@@ -48,11 +48,12 @@
   - **Est**: 12 lines, 10 min
   - **COMPLETED**: Created fetch_order_book() function, handles errors gracefully, tested (note: API returns mostly historical markets)
 
-- [ ] **1.1.5**: Add error handling and retries
+- [✓] **1.1.5**: Add error handling and retries
   - Try/except with 3 retries
   - Exponential backoff
   - Test: Invalid market ID
   - **Est**: 25 lines, 15 min
+  - **COMPLETED**: Added retry_with_backoff() function with exponential backoff (1s, 2s, 4s), tested with invalid token, converts API objects to dicts
 
 - [ ] **1.1.6**: Test with real API for 30 minutes
   - Run fetch loop

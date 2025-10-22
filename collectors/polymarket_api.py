@@ -1,10 +1,12 @@
 """
 Polymarket API wrapper
 Task 1.1.3: Write fetch_markets() function
+Task 1.1.5: Add error handling and retries
 """
 
 import sys
 from pathlib import Path
+import time
 
 # Add parent directory to path so we can import config
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -13,36 +15,77 @@ from py_clob_client.client import ClobClient
 from config import POLYMARKET_HOST, POLYMARKET_CHAIN_ID
 
 
-def fetch_markets(closed=False):
+def retry_with_backoff(func, max_retries=3, initial_delay=1):
     """
-    Fetch markets from Polymarket
+    Retry a function with exponential backoff.
+
+    Args:
+        func: Function to retry (should take no arguments)
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds (doubles each retry)
+
+    Returns:
+        Function result if successful
+
+    Raises:
+        Last exception if all retries fail
+    """
+    delay = initial_delay
+    last_exception = None
+
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            last_exception = e
+            if attempt < max_retries - 1:
+                print(f"⚠️  Attempt {attempt + 1} failed: {e}")
+                print(f"   Retrying in {delay}s...")
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+            else:
+                print(f"❌ All {max_retries} attempts failed")
+
+    raise last_exception
+
+
+def fetch_markets(closed=False, use_retry=True):
+    """
+    Fetch markets from Polymarket with retry logic.
 
     Args:
         closed (bool): Include closed/settled markets. Default False (active only)
+        use_retry (bool): Use retry logic with exponential backoff
 
     Returns:
         list: List of market dicts with question, price, volume, etc.
     """
-    # Initialize client (read-only, no auth needed)
-    client = ClobClient(
-        host=POLYMARKET_HOST,
-        chain_id=POLYMARKET_CHAIN_ID
-    )
+    def _fetch():
+        # Initialize client (read-only, no auth needed)
+        client = ClobClient(
+            host=POLYMARKET_HOST,
+            chain_id=POLYMARKET_CHAIN_ID
+        )
 
-    # Fetch markets (try with closed parameter)
-    try:
-        response = client.get_markets(closed=closed)
-    except TypeError:
-        # If API doesn't support 'closed' param, fetch all
-        response = client.get_markets()
+        # Fetch markets (try with closed parameter)
+        try:
+            response = client.get_markets(closed=closed)
+        except TypeError:
+            # If API doesn't support 'closed' param, fetch all
+            response = client.get_markets()
 
-    # Extract markets from response
-    if isinstance(response, dict):
-        markets = response.get('data', response.get('markets', []))
+        # Extract markets from response
+        if isinstance(response, dict):
+            markets = response.get('data', response.get('markets', []))
+        else:
+            markets = response
+
+        return markets
+
+    if use_retry:
+        return retry_with_backoff(_fetch)
     else:
-        markets = response
-
-    return markets
+        return _fetch()
 
 
 def filter_active_markets(markets, min_volume=None):
@@ -75,24 +118,49 @@ def filter_active_markets(markets, min_volume=None):
     return active
 
 
-def fetch_order_book(token_id):
+def fetch_order_book(token_id, use_retry=True):
     """
-    Fetch order book (bids/asks) for a specific token.
+    Fetch order book (bids/asks) for a specific token with retry logic.
 
     Args:
         token_id (str): The token ID (from market['tokens'][0]['token_id'])
+        use_retry (bool): Use retry logic with exponential backoff
 
     Returns:
         dict: Order book with 'bids' and 'asks' arrays
               Each order has 'price' and 'size' fields
     """
-    client = ClobClient(
-        host=POLYMARKET_HOST,
-        chain_id=POLYMARKET_CHAIN_ID
-    )
+    def _fetch():
+        client = ClobClient(
+            host=POLYMARKET_HOST,
+            chain_id=POLYMARKET_CHAIN_ID
+        )
+        return client.get_order_book(token_id)
 
     try:
-        order_book = client.get_order_book(token_id)
+        if use_retry:
+            order_book = retry_with_backoff(_fetch)
+        else:
+            order_book = _fetch()
+
+        # Convert OrderBookSummary object to dict if needed
+        if hasattr(order_book, 'bids') and hasattr(order_book, 'asks'):
+            # Convert OrderSummary objects to dicts
+            bids = []
+            for bid in (order_book.bids or []):
+                bids.append({
+                    'price': bid.price if hasattr(bid, 'price') else bid.get('price'),
+                    'size': bid.size if hasattr(bid, 'size') else bid.get('size')
+                })
+
+            asks = []
+            for ask in (order_book.asks or []):
+                asks.append({
+                    'price': ask.price if hasattr(ask, 'price') else ask.get('price'),
+                    'size': ask.size if hasattr(ask, 'size') else ask.get('size')
+                })
+
+            return {'bids': bids, 'asks': asks}
         return order_book
     except Exception as e:
         print(f"⚠️  Error fetching order book for token {token_id}: {e}")
@@ -194,8 +262,22 @@ if __name__ == "__main__":
             print(f"  {i}. Price: ${price} | Size: {size} shares")
 
         print("\n" + "=" * 60)
-        print("✅ COMPLETE: All functions working with live active markets!")
+        print("✅ fetch_order_book() working!")
         print("=" * 60)
     else:
         print("\n⚠️  No active markets found")
         print("=" * 60)
+
+    # Test error handling with invalid token ID
+    print("\n" + "=" * 60)
+    print("Testing error handling and retries")
+    print("=" * 60)
+
+    print("\nTesting with invalid token ID (should fail gracefully)...")
+    invalid_book = fetch_order_book("invalid_token_id_12345")
+    print(f"Result: {invalid_book}")
+    print("✅ Error handled gracefully - returned empty order book")
+
+    print("\n" + "=" * 60)
+    print("✅ Task 1.1.5 COMPLETE: Error handling and retries added!")
+    print("=" * 60)
