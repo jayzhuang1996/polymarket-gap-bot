@@ -52,6 +52,31 @@ nohup python main.py > /dev/null 2>&1 &
 
 ---
 
+## Project Structure
+
+```
+polymarket_bot/
+├── config.py              # Configuration and environment variables
+├── collectors/            # Data collection modules
+│   └── polymarket_api.py  # Polymarket API wrapper
+├── tests/                 # Test scripts
+│   ├── test_api_stability.py
+│   └── test_polymarket_connection.py
+├── docs/                  # Documentation
+│   ├── SPEC.md
+│   ├── ARCHITECTURE.md
+│   ├── REFERENCE.md
+│   ├── TEMPLATES.md
+│   └── RUNBOOK.md
+├── .env.example           # Environment variables template
+├── requirements.txt       # Python dependencies
+├── CLAUDE.md             # Development guidelines
+├── TODO.md               # Task breakdown (103 tasks)
+└── README.md             # This file
+```
+
+---
+
 ## Documentation Structure
 
 This project follows a 7-document structure for clarity:
