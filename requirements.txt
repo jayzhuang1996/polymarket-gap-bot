@@ -1,0 +1,29 @@
+# Polymarket API
+py-clob-client==0.27.0
+
+# AI (Claude)
+anthropic>=0.40.0
+
+# Telegram Bot
+python-telegram-bot>=20.0
+
+# Database
+# (using built-in sqlite3, no package needed)
+
+# Scheduling
+APScheduler>=3.10.0
+
+# News scraping
+feedparser>=6.0.0
+
+# Data manipulation
+pandas>=2.0.0
+
+# HTTP requests
+requests>=2.31.0
+
+# Environment variables
+python-dotenv>=1.0.0
+
+# Testing
+pytest>=7.4.0
