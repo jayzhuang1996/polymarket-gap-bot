@@ -66,9 +66,10 @@
 
 ### Component 1.2: Database (6 tasks)
 
-- [ ] **1.2.1**: Create database/schema.sql
+- [✓] **1.2.1**: Create database/schema.sql
   - Define 3 tables: markets, positions, news_events
   - **Est**: 40 lines, 20 min
+  - **COMPLETED**: Created schema with 3 tables (13-18 columns each), 6 indexes, tested successfully
 
 - [ ] **1.2.2**: Write init_database() function
   - Create SQLite file
