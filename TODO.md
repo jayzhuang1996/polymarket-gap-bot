@@ -36,10 +36,11 @@
   - **Est**: 20 lines, 10 min
   - **COMPLETED**: Created config.py with all constants, .env.example template, validation function
 
-- [ ] **1.1.3**: Write fetch_markets() function
+- [✓] **1.1.3**: Write fetch_markets() function
   - Return all active markets
   - Test: Print count, show 3 samples
   - **Est**: 15 lines, 15 min
+  - **COMPLETED**: Created collectors/polymarket_api.py, fetch_markets() returns 1000 markets
 
 - [ ] **1.1.4**: Write fetch_order_book(market_id)
   - Get bids/asks for specific market
