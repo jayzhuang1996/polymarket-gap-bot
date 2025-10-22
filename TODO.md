@@ -30,10 +30,11 @@
   - **Est**: 10 lines, 10 min
   - **COMPLETED**: Virtual env setup, installed py-clob-client, tested connection, fetched 1000 markets
 
-- [ ] **1.1.2**: Create config.py with environment variables
+- [✓] **1.1.2**: Create config.py with environment variables
   - Load from .env file
   - Test: Print API key (last 4 chars only)
   - **Est**: 20 lines, 10 min
+  - **COMPLETED**: Created config.py with all constants, .env.example template, validation function
 
 - [ ] **1.1.3**: Write fetch_markets() function
   - Return all active markets
