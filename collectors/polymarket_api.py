@@ -45,16 +45,16 @@ def fetch_markets(closed=False):
     return markets
 
 
-def filter_active_markets(markets, min_volume=100):
+def filter_active_markets(markets, min_volume=None):
     """
-    Filter for active markets with ongoing trading.
+    Filter for active markets (not settled).
 
     Args:
         markets (list): List of market dicts from fetch_markets()
-        min_volume (float): Minimum 24h volume in USD
+        min_volume (float): Minimum 24h volume in USD (optional, often 0 in API)
 
     Returns:
-        list: Markets that are actively trading (not settled)
+        list: Markets that are actively trading (price between 0.01-0.99)
     """
     active = []
     for market in markets:
@@ -62,10 +62,14 @@ def filter_active_markets(markets, min_volume=100):
             continue
 
         price = float(market['tokens'][0].get('price', 0))
-        volume = float(market.get('volume', 0))
 
-        # Active if: price not settled (0.01-0.99) and has volume
-        if 0.01 < price < 0.99 and volume >= min_volume:
+        # Active if: price not settled (0.01-0.99)
+        if 0.01 < price < 0.99:
+            # If volume filter requested, apply it
+            if min_volume is not None:
+                volume = float(market.get('volume', 0))
+                if volume < min_volume:
+                    continue
             active.append(market)
 
     return active
@@ -102,9 +106,20 @@ if __name__ == "__main__":
     print("Testing fetch_markets()")
     print("=" * 60)
 
-    markets = fetch_markets()
+    # Test both endpoints
+    markets_default = fetch_markets()
+    print(f"\n✅ fetch_markets() returned {len(markets_default)} markets")
 
-    print(f"\n✅ Fetched {len(markets)} markets from Polymarket")
+    # Try sampling endpoint
+    from py_clob_client.client import ClobClient
+    client = ClobClient(POLYMARKET_HOST, POLYMARKET_CHAIN_ID)
+    response = client.get_sampling_markets()
+    if isinstance(response, dict):
+        markets = response.get('data', response.get('markets', []))
+    else:
+        markets = response
+
+    print(f"✅ get_sampling_markets() returned {len(markets)} markets")
 
     # Show 3 sample markets
     print(f"\n📊 Sample Markets (showing 3 of {len(markets)}):\n")
@@ -135,13 +150,8 @@ if __name__ == "__main__":
     print("Testing filter_active_markets()")
     print("=" * 60)
 
-    # Try different volume thresholds
-    print("\nTesting different volume thresholds:")
-    for vol in [1000, 100, 10, 1]:
-        count = len(filter_active_markets(markets, min_volume=vol))
-        print(f"  Volume >= ${vol}: {count} markets")
-
-    active_markets = filter_active_markets(markets, min_volume=1)
+    # Filter by price only (volume data seems unreliable in API)
+    active_markets = filter_active_markets(markets)
     print(f"\n✅ Found {len(active_markets)} active markets (out of {len(markets)} total)")
 
     if active_markets:
