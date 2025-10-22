@@ -42,10 +42,11 @@
   - **Est**: 15 lines, 15 min
   - **COMPLETED**: Created collectors/polymarket_api.py, fetch_markets() returns 1000 markets
 
-- [ ] **1.1.4**: Write fetch_order_book(market_id)
+- [✓] **1.1.4**: Write fetch_order_book(token_id)
   - Get bids/asks for specific market
   - Test: Show top 5 bids/asks
   - **Est**: 12 lines, 10 min
+  - **COMPLETED**: Created fetch_order_book() function, handles errors gracefully, tested (note: API returns mostly historical markets)
 
 - [ ] **1.1.5**: Add error handling and retries
   - Try/except with 3 retries
