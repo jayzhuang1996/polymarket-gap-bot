@@ -13,9 +13,12 @@ from py_clob_client.client import ClobClient
 from config import POLYMARKET_HOST, POLYMARKET_CHAIN_ID
 
 
-def fetch_markets():
+def fetch_markets(closed=False):
     """
-    Fetch all active markets from Polymarket
+    Fetch markets from Polymarket
+
+    Args:
+        closed (bool): Include closed/settled markets. Default False (active only)
 
     Returns:
         list: List of market dicts with question, price, volume, etc.
@@ -26,8 +29,12 @@ def fetch_markets():
         chain_id=POLYMARKET_CHAIN_ID
     )
 
-    # Fetch markets
-    response = client.get_markets()
+    # Fetch markets (try with closed parameter)
+    try:
+        response = client.get_markets(closed=closed)
+    except TypeError:
+        # If API doesn't support 'closed' param, fetch all
+        response = client.get_markets()
 
     # Extract markets from response
     if isinstance(response, dict):
@@ -36,6 +43,32 @@ def fetch_markets():
         markets = response
 
     return markets
+
+
+def filter_active_markets(markets, min_volume=100):
+    """
+    Filter for active markets with ongoing trading.
+
+    Args:
+        markets (list): List of market dicts from fetch_markets()
+        min_volume (float): Minimum 24h volume in USD
+
+    Returns:
+        list: Markets that are actively trading (not settled)
+    """
+    active = []
+    for market in markets:
+        if 'tokens' not in market or len(market['tokens']) == 0:
+            continue
+
+        price = float(market['tokens'][0].get('price', 0))
+        volume = float(market.get('volume', 0))
+
+        # Active if: price not settled (0.01-0.99) and has volume
+        if 0.01 < price < 0.99 and volume >= min_volume:
+            active.append(market)
+
+    return active
 
 
 def fetch_order_book(token_id):
@@ -97,28 +130,34 @@ if __name__ == "__main__":
     print("✅ fetch_markets() working!")
     print("=" * 60)
 
-    # Test fetch_order_book() with an active market
+    # Test filter_active_markets()
+    print("\n" + "=" * 60)
+    print("Testing filter_active_markets()")
+    print("=" * 60)
+
+    # Try different volume thresholds
+    print("\nTesting different volume thresholds:")
+    for vol in [1000, 100, 10, 1]:
+        count = len(filter_active_markets(markets, min_volume=vol))
+        print(f"  Volume >= ${vol}: {count} markets")
+
+    active_markets = filter_active_markets(markets, min_volume=1)
+    print(f"\n✅ Found {len(active_markets)} active markets (out of {len(markets)} total)")
+
+    if active_markets:
+        print(f"\n📊 Sample active markets:")
+        for i, market in enumerate(active_markets[:3], 1):
+            yes_token = market['tokens'][0]
+            print(f"\n{i}. {market.get('question', 'N/A')}")
+            print(f"   YES Price: ${yes_token.get('price')}")
+            print(f"   24h Volume: ${float(market.get('volume', 0)):,.0f}")
+
+    # Test fetch_order_book() with first active market
     print("\n" + "=" * 60)
     print("Testing fetch_order_book()")
     print("=" * 60)
 
-    # Find a market with active trading (volume > 0, price between 0.01-0.99)
-    test_market = None
-    print("\nSearching for active market in first 200...")
-    for i, market in enumerate(markets[:200]):  # Check first 200 markets
-        if 'tokens' in market and len(market['tokens']) > 0:
-            yes_token = market['tokens'][0]
-            price = float(yes_token.get('price', 0))
-            volume = float(market.get('volume', 0))
-
-            if i < 5:  # Debug: show first 5
-                print(f"  Market {i+1}: price={price}, volume={volume}")
-
-            # Active market: has volume and reasonable price
-            if volume > 100 and 0.01 < price < 0.99:
-                test_market = market
-                print(f"✓ Found active market at position {i+1}")
-                break
+    test_market = active_markets[0] if active_markets else None
 
     if test_market:
         yes_token = test_market['tokens'][0]
@@ -145,11 +184,8 @@ if __name__ == "__main__":
             print(f"  {i}. Price: ${price} | Size: {size} shares")
 
         print("\n" + "=" * 60)
-        print("✅ Task 1.1.4 COMPLETE: fetch_order_book() working!")
+        print("✅ COMPLETE: All functions working with live active markets!")
         print("=" * 60)
     else:
-        print("\n⚠️  No active markets found in first 200 markets")
-        print("(This is OK - function still works, just no live data to test with)")
-        print("\n" + "=" * 60)
-        print("✅ Task 1.1.4 COMPLETE: fetch_order_book() function created!")
+        print("\n⚠️  No active markets found")
         print("=" * 60)
