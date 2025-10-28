@@ -71,7 +71,7 @@
 - `polymarket_api.py` - Fetch markets, order books, prices
 - `news_scraper.py` - Scrape RSS feeds, match to markets
 
-**Schedule**: Every 5 minutes (markets), every 15 minutes (news)
+**Schedule**: Every 8 hours (markets), every 4 hours (news)
 
 **Output**: Database populated with current state
 
@@ -218,7 +218,7 @@ Every 60 minutes:
 4. Check liquidity health
 5. Alert if decaying
 
-Every 5 minutes:
+Every 8 hours:
 6. Scan for new opportunities
 7. Update database
 ```
@@ -293,8 +293,8 @@ Every 5 minutes:
 ### APScheduler Jobs
 
 ```python
-# Market scanning (every 5 min)
-scheduler.add_job(scan_markets, 'interval', minutes=5)
+# Market scanning (every 8 hours)
+scheduler.add_job(scan_markets, 'interval', hours=8)
 
 # Price monitoring (every 60 sec)
 scheduler.add_job(monitor_prices, 'interval', seconds=60)
@@ -302,7 +302,10 @@ scheduler.add_job(monitor_prices, 'interval', seconds=60)
 # Liquidity monitoring (every 60 min)
 scheduler.add_job(monitor_liquidity, 'interval', minutes=60)
 
-# News monitoring (every 60 sec for positions)
+# News scraping (every 4 hours)
+scheduler.add_job(scrape_news, 'interval', hours=4)
+
+# News monitoring (every 60 sec for active positions only)
 scheduler.add_job(monitor_news, 'interval', seconds=60)
 
 # Morning report (8 AM daily)

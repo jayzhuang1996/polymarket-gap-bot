@@ -129,8 +129,8 @@ Trade: Buy YES @ $0.93 → Settles @ $1.00 → 7.5% profit in 24 hours
 
 ### Fully Automated (No Human)
 
-8. **Data Collection** - Continuous polling every 5 min
-9. **Opportunity Scanning** - Pipeline runs automatically
+8. **Data Collection** - Scheduled polling every 8 hours
+9. **Opportunity Scanning** - Pipeline runs automatically after each collection
 10. **Stop-Loss Execution** - Auto-triggers at predetermined level
 11. **Take-Profit Execution** - Auto-executes at target prices
 

@@ -17,9 +17,16 @@ CREATE TABLE IF NOT EXISTS markets (
     yes_price REAL NOT NULL,
     no_price REAL,
 
-    -- Liquidity & volume
+    -- Liquidity & trading info
     volume_24h REAL DEFAULT 0,
     liquidity REAL DEFAULT 0,
+    minimum_order_size REAL DEFAULT 0,
+    accepting_orders BOOLEAN DEFAULT 0,
+    enable_order_book BOOLEAN DEFAULT 0,
+
+    -- Quality indicators
+    quality_score INTEGER DEFAULT 0,
+    neg_risk BOOLEAN DEFAULT 0,
 
     -- Metadata
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

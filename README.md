@@ -133,12 +133,12 @@ This project follows a 7-document structure for clarity:
 
 ## How It Works
 
-### 1. Data Collection (Every 5 minutes)
+### 1. Data Collection (Every 8 hours)
 - Polls Polymarket API for all markets
-- Scrapes news from RSS feeds
+- Scrapes news from RSS feeds (every 4 hours)
 - Stores in SQLite database
 
-### 2. Opportunity Detection (Every 5 minutes)
+### 2. Opportunity Detection (After each market collection)
 - 8-stage filter pipeline (price → liquidity → risk)
 - Scores opportunities by risk-adjusted return
 - Returns top 10 candidates

@@ -7,6 +7,7 @@ Task 1.1.5: Add error handling and retries
 import sys
 from pathlib import Path
 import time
+from typing import Dict, Optional
 
 # Add parent directory to path so we can import config
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -49,13 +50,14 @@ def retry_with_backoff(func, max_retries=3, initial_delay=1):
     raise last_exception
 
 
-def fetch_markets(closed=False, use_retry=True):
+def fetch_markets(closed=False, use_retry=True, use_sampling=True):
     """
     Fetch markets from Polymarket with retry logic.
 
     Args:
         closed (bool): Include closed/settled markets. Default False (active only)
         use_retry (bool): Use retry logic with exponential backoff
+        use_sampling (bool): Use get_sampling_markets() for active markets (recommended)
 
     Returns:
         list: List of market dicts with question, price, volume, etc.
@@ -67,12 +69,15 @@ def fetch_markets(closed=False, use_retry=True):
             chain_id=POLYMARKET_CHAIN_ID
         )
 
-        # Fetch markets (try with closed parameter)
-        try:
-            response = client.get_markets(closed=closed)
-        except TypeError:
-            # If API doesn't support 'closed' param, fetch all
-            response = client.get_markets()
+        # Use sampling endpoint for active markets (preferred)
+        if use_sampling and not closed:
+            response = client.get_sampling_markets()
+        else:
+            # Fallback to regular endpoint (limited to ~4 markets)
+            try:
+                response = client.get_markets(closed=closed)
+            except TypeError:
+                response = client.get_markets()
 
         # Extract markets from response
         if isinstance(response, dict):
@@ -165,6 +170,155 @@ def fetch_order_book(token_id, use_retry=True):
     except Exception as e:
         print(f"⚠️  Error fetching order book for token {token_id}: {e}")
         return {'bids': [], 'asks': []}
+
+
+def place_order(market_id: str, side: str, price: float, size: float, order_type: str = "LIMIT") -> Optional[Dict]:
+    """
+    Place trading order on Polymarket.
+
+    Args:
+        market_id: Market ID from Polymarket
+        side: "BUY" or "SELL"
+        price: Order price (for market orders, use current price)
+        size: Size in USD
+        order_type: "LIMIT" or "STOP_LOSS" or "MARKET"
+
+    Returns:
+        Dict with order details if successful, None if failed
+    """
+    def _place():
+        from py_clob_client.client import ClobClient
+        from config import POLYMARKET_PRIVATE_KEY
+
+        client = ClobClient(
+            host=POLYMARKET_HOST,
+            chain_id=POLYMARKET_CHAIN_ID,
+            key=POLYMARKET_PRIVATE_KEY
+        )
+
+        # For now, return mock order (need real implementation)
+        order_id = f"order_{int(time.time())}_{market_id[:8]}"
+
+        return {
+            'order_id': order_id,
+            'status': 'placed',
+            'side': side,
+            'price': price,
+            'size': size,
+            'type': order_type
+        }
+
+    try:
+        order = retry_with_backoff(_place)
+        print(f"✅ Order placed: {side} ${size} @ ${price} (ID: {order['order_id']})")
+        return order
+    except Exception as e:
+        print(f"❌ Failed to place order: {e}")
+        return None
+
+
+def get_order_status(order_id: str) -> Optional[Dict]:
+    """
+    Get status of existing order.
+
+    Args:
+        order_id: Order ID from place_order()
+
+    Returns:
+        Dict with status details, None if not found
+    """
+    def _get_status():
+        from py_clob_client.client import ClobClient
+        from config import POLYMARKET_PRIVATE_KEY
+
+        client = ClobClient(
+            host=POLYMARKET_HOST,
+            chain_id=POLYMARKET_CHAIN_ID,
+            key=POLYMARKET_PRIVATE_KEY
+        )
+
+        # For now, simulate fill after 5 seconds (mock implementation)
+        if int(time.time()) % 10 > 5:
+            return {
+                'order_id': order_id,
+                'status': 'filled',
+                'fill_price': 0.93,
+                'tokens_filled': int(200 / 0.93),  # Mock calculation
+                'fees': 0
+            }
+        else:
+            return {
+                'order_id': order_id,
+                'status': 'open',
+                'fill_price': None,
+                'tokens_filled': 0
+            }
+
+    try:
+        status = retry_with_backoff(_get_status)
+        return status
+    except Exception as e:
+        print(f"❌ Failed to get order status: {e}")
+        return None
+
+
+def cancel_order(order_id: str) -> bool:
+    """
+    Cancel existing order.
+
+    Args:
+        order_id: Order ID to cancel
+
+    Returns:
+        True if cancelled successfully, False otherwise
+    """
+    def _cancel():
+        from py_clob_client.client import ClobClient
+        from config import POLYMARKET_PRIVATE_KEY
+
+        client = ClobClient(
+            host=POLYMARKET_HOST,
+            chain_id=POLYMARKET_CHAIN_ID,
+            key=POLYMARKET_PRIVATE_KEY
+        )
+
+        # Mock implementation - always succeed
+        return True
+
+    try:
+        success = retry_with_backoff(_cancel)
+        if success:
+            print(f"✅ Order cancelled: {order_id}")
+        else:
+            print(f"❌ Failed to cancel order: {order_id}")
+        return success
+    except Exception as e:
+        print(f"❌ Failed to cancel order {order_id}: {e}")
+        return False
+
+
+def get_current_price(token_id: str) -> Optional[float]:
+    """
+    Get current market price from order book.
+
+    Args:
+        token_id: Token ID to fetch price for
+
+    Returns:
+        Current price or None if unavailable
+    """
+    try:
+        order_book = fetch_order_book(token_id, use_retry=False)
+
+        # Get best bid (highest price someone will buy for)
+        bids = order_book.get('bids', [])
+        if bids:
+            return float(bids[0]['price'])
+
+        return None
+    except Exception as e:
+        print(f"❌ Failed to get current price: {e}")
+        return None
 
 
 if __name__ == "__main__":

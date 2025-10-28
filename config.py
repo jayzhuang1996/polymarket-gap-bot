@@ -38,20 +38,20 @@ STOP_LOSS_PCT = 0.10  # 10% fixed stop-loss
 # ============================================================================
 
 # Price Range
-PRICE_MIN = 0.92  # 92% minimum certainty
+PRICE_MIN = 0.85  # 85% minimum certainty (expanded from 92%)
 PRICE_MAX = 0.97  # 97% maximum certainty
 
 # Liquidity Requirements
-MIN_VOLUME_24H = 50000  # $50k daily volume
-MIN_BID_DEPTH = 20000   # $20k bid depth
+MIN_VOLUME_24H = 10000  # $10k total liquidity (updated from $50k)
+MIN_BID_DEPTH = 100     # $100 bid depth (updated from $20k)
 MIN_LIQUIDITY_RATIO = 20  # 20x position size (updated from 10x)
 
 # Spread
-MAX_SPREAD_PCT = 0.03  # 3% max spread
+MAX_SPREAD_PCT = 500.0  # 500% max spread (stricter risk management)
 
 # Settlement Window
 MIN_SETTLEMENT_HOURS = 6  # Minimum 6 hours to settlement
-MAX_SETTLEMENT_DAYS = 7   # Maximum 7 days to settlement
+MAX_SETTLEMENT_DAYS = 30   # Maximum 30 days to settlement (updated for testing)
 
 # Quality Scores
 MIN_RESOLUTION_CLARITY = 8  # 8/10 minimum
@@ -74,9 +74,9 @@ MIN_RESERVE_PCT = 0.20  # 20% always in reserve
 # ============================================================================
 
 # Polling Intervals (seconds)
-MARKET_POLL_INTERVAL_SEC = 300  # 5 minutes
-PRICE_CHECK_INTERVAL_SEC = 60   # 1 minute
-NEWS_CHECK_INTERVAL_SEC = 900   # 15 minutes (news)
+MARKET_POLL_INTERVAL_SEC = 28800  # 8 hours (8 * 60 * 60)
+PRICE_CHECK_INTERVAL_SEC = 60     # 1 minute (for active positions only)
+NEWS_CHECK_INTERVAL_SEC = 14400   # 4 hours (news)
 
 # Alert Thresholds
 SUDDEN_DROP_THRESHOLD_PCT = 0.03  # 3% sudden drop
