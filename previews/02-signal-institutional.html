@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gap Bot — Signal Institutional</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,300;1,8..60,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --navy:    #1c2644;
+  --navy2:   #232f55;
+  --navy3:   #2e3d5c;
+  --cream:   #e2dcd0;
+  --cream2:  #8a96a8;
+  --cream3:  #4e5a6e;
+  --gold:    #c8a870;
+  --green:   #4ade80;
+  --red:     #f87171;
+  --amber:   #fbbf24;
+  --f-ser:   "Source Serif 4", Georgia, serif;
+  --f-sans:  "DM Sans", system-ui, sans-serif;
+  --f-mono:  "IBM Plex Mono", monospace;
+}
+html, body { background: var(--navy); color: var(--cream); font-family: var(--f-sans); min-height: 100vh; -webkit-font-smoothing: antialiased; }
+body { padding: 32px 40px 52px; }
+
+/* ─── HEADER ─────────────────────────────────────────────────── */
+header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 32px; }
+.logo-area { display: flex; flex-direction: column; gap: 4px; }
+.logo-eyebrow { font-family: var(--f-mono); font-size: 0.6rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--gold); }
+.logo-title { font-family: var(--f-ser); font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; color: var(--cream); }
+.logo-title em { font-style: italic; font-weight: 300; color: var(--gold); }
+.header-right { text-align: right; display: flex; flex-direction: column; gap: 5px; }
+.ws-badge {
+  font-family: var(--f-mono); font-size: 0.6rem; letter-spacing: 0.1em;
+  text-transform: uppercase; padding: 4px 10px;
+  border: 1px solid var(--green); color: var(--green);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.ws-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.header-date { font-family: var(--f-mono); font-size: 0.6rem; color: var(--cream3); letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* ─── DIVIDER ────────────────────────────────────────────────── */
+.rule { height: 1px; background: var(--navy3); margin-bottom: 28px; }
+
+/* ─── STATS ROW ──────────────────────────────────────────────── */
+.stats-row { display: flex; gap: 0; margin-bottom: 28px; border: 1px solid var(--navy3); }
+.stat { flex: 1; padding: 16px 22px; border-right: 1px solid var(--navy3); }
+.stat:last-child { border-right: none; }
+.stat-num { font-family: var(--f-sans); font-weight: 600; font-size: 1.5rem; line-height: 1; }
+.stat-num.green { color: var(--green); }
+.stat-num.white { color: var(--cream); }
+.stat-label { font-family: var(--f-mono); font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--cream3); margin-top: 5px; }
+
+/* ─── GRID ───────────────────────────────────────────────────── */
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+@media (max-width: 1000px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+
+/* ─── CARD ───────────────────────────────────────────────────── */
+.card {
+  background: var(--navy2); border: 1px solid var(--navy3);
+  padding: 20px 22px 18px;
+  display: flex; flex-direction: column; gap: 14px;
+}
+.card.signal-pos { border-left: 3px solid var(--green); }
+.card.signal-neg { border-left: 3px solid var(--red); opacity: 0.7; }
+
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; }
+.ticker-wrap {}
+.ticker { font-family: var(--f-ser); font-weight: 700; font-size: 1.4rem; letter-spacing: -0.02em; color: var(--cream); line-height: 1; }
+.ticker-sub { font-family: var(--f-mono); font-size: 0.58rem; color: var(--cream3); letter-spacing: 0.06em; text-transform: uppercase; margin-top: 3px; }
+
+.gap-pill {
+  font-family: var(--f-mono); font-size: 0.6rem;
+  padding: 3px 9px; letter-spacing: 0.04em;
+  border-radius: 2px;
+}
+.gap-pill.up   { background: rgba(74,222,128,0.12); color: var(--green); }
+.gap-pill.down { background: rgba(248,113,113,0.12); color: var(--red); }
+.gap-pill.flat { background: rgba(78,90,110,0.4); color: var(--cream3); }
+
+/* Edge panel */
+.edge-panel {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--navy3);
+  padding: 12px 14px;
+}
+.edge-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; }
+.edge-label { font-family: var(--f-mono); font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--gold); }
+.edge-val { font-family: var(--f-sans); font-weight: 600; font-size: 1.25rem; }
+.edge-val.pos { color: var(--green); }
+.edge-val.neg { color: var(--red); }
+.edge-sub { font-family: var(--f-mono); font-size: 0.58rem; color: var(--cream3); letter-spacing: 0.04em; }
+
+/* Price rows */
+.prices { display: grid; grid-template-columns: 32px 1fr 1fr 46px; font-family: var(--f-mono); font-size: 0.65rem; gap: 0; }
+.ph { color: var(--cream3); font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.08em; padding: 3px 0 4px; border-bottom: 1px solid var(--navy3); }
+.ph:first-child { border-bottom: none; }
+.pc { padding: 4px 0; border-bottom: 1px solid rgba(46,61,92,0.6); color: var(--cream); font-variant-numeric: tabular-nums; }
+.pl { color: var(--cream2); font-size: 0.58rem; }
+.ps.good { color: var(--green); }
+.ps.ok   { color: var(--amber); }
+.ps.bad  { color: var(--red); }
+
+.card-foot { font-family: var(--f-mono); font-size: 0.54rem; color: var(--cream3); letter-spacing: 0.04em; border-top: 1px solid var(--navy3); padding-top: 10px; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo-area">
+    <div class="logo-eyebrow">Polymarket · Finance Daily</div>
+    <div class="logo-title">Gap Bot <em>Dashboard</em></div>
+  </div>
+  <div class="header-right">
+    <div><span class="ws-badge">LIVE FEED</span></div>
+    <div class="header-date">May 22 2026 · 09:47 ET</div>
+  </div>
+</header>
+
+<div class="rule"></div>
+
+<div class="stats-row">
+  <div class="stat">
+    <div class="stat-num green">+$490.41</div>
+    <div class="stat-label">Cumulative P&L</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num white">50.0%</div>
+    <div class="stat-label">Win Rate</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num white">12</div>
+    <div class="stat-label">Total Trades</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num white">7 / 9</div>
+    <div class="stat-label">Live Markets</div>
+  </div>
+  <div class="stat">
+    <div class="stat-num white">0</div>
+    <div class="stat-label">Open Positions</div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <div class="card signal-pos">
+    <div class="card-head">
+      <div class="ticker-wrap">
+        <div class="ticker">SPX</div>
+        <div class="ticker-sub">S&amp;P 500 Index</div>
+      </div>
+      <div class="gap-pill down">▼ −30 bps</div>
+    </div>
+    <div class="edge-panel">
+      <div class="edge-top">
+        <span class="edge-label">BUY NO · Edge@Ask</span>
+        <span class="edge-val pos">+58.2%</span>
+      </div>
+      <div class="edge-sub">WR 80.0% · Entry $0.220 · Breakeven 22.2%</div>
+    </div>
+    <div class="prices">
+      <span class="ph"></span><span class="ph">Ask</span><span class="ph">Bid</span><span class="ph">Spread</span>
+      <span class="pc pl">YES</span><span class="pc">0.820</span><span class="pc">0.779</span><span class="pc ps ok">5.1%</span>
+      <span class="pc pl">NO</span><span class="pc">0.220</span><span class="pc">0.180</span><span class="pc ps good">4.2%</span>
+    </div>
+    <div class="card-foot"><span>Updated 09:47:12 ET</span><span>Spreads tight</span></div>
+  </div>
+
+  <div class="card signal-pos">
+    <div class="card-head">
+      <div class="ticker-wrap">
+        <div class="ticker">NVDA</div>
+        <div class="ticker-sub">NVIDIA Corporation</div>
+      </div>
+      <div class="gap-pill down">▼ −53 bps</div>
+    </div>
+    <div class="edge-panel">
+      <div class="edge-top">
+        <span class="edge-label">BUY NO · Edge@Ask</span>
+        <span class="edge-val pos">+23.4%</span>
+      </div>
+      <div class="edge-sub">WR 65.0% · Entry $0.400 · Breakeven 40.4%</div>
+    </div>
+    <div class="prices">
+      <span class="ph"></span><span class="ph">Ask</span><span class="ph">Bid</span><span class="ph">Spread</span>
+      <span class="pc pl">YES</span><span class="pc">0.630</span><span class="pc">0.598</span><span class="pc ps ok">5.1%</span>
+      <span class="pc pl">NO</span><span class="pc">0.400</span><span class="pc">0.370</span><span class="pc ps ok">7.9%</span>
+    </div>
+    <div class="card-foot"><span>Updated 09:47:08 ET</span><span>—</span></div>
+  </div>
+
+  <div class="card signal-pos">
+    <div class="card-head">
+      <div class="ticker-wrap">
+        <div class="ticker">TSLA</div>
+        <div class="ticker-sub">Tesla, Inc.</div>
+      </div>
+      <div class="gap-pill up">▲ +118 bps</div>
+    </div>
+    <div class="edge-panel">
+      <div class="edge-top">
+        <span class="edge-label">BUY YES · Edge@Ask</span>
+        <span class="edge-val pos">+3.3%</span>
+      </div>
+      <div class="edge-sub">WR 75.0% · Entry $0.710 · Breakeven 71.7%</div>
+    </div>
+    <div class="prices">
+      <span class="ph"></span><span class="ph">Ask</span><span class="ph">Bid</span><span class="ph">Spread</span>
+      <span class="pc pl">YES</span><span class="pc">0.710</span><span class="pc">0.674</span><span class="pc ps ok">5.2%</span>
+      <span class="pc pl">NO</span><span class="pc">0.290</span><span class="pc">0.260</span><span class="pc ps good">3.9%</span>
+    </div>
+    <div class="card-foot"><span>Updated 09:47:05 ET</span><span>Edge near threshold</span></div>
+  </div>
+
+  <div class="card signal-pos">
+    <div class="card-head">
+      <div class="ticker-wrap">
+        <div class="ticker">AAPL</div>
+        <div class="ticker-sub">Apple Inc.</div>
+      </div>
+      <div class="gap-pill down">▼ −39 bps</div>
+    </div>
+    <div class="edge-panel">
+      <div class="edge-top">
+        <span class="edge-label">BUY NO · Edge@Ask</span>
+        <span class="edge-val pos">+30.3%</span>
+      </div>
+      <div class="edge-sub">WR 71.0% · Entry $0.380 · Breakeven 38.4%</div>
+    </div>
+    <div class="prices">
+      <span class="ph"></span><span class="ph">Ask</span><span class="ph">Bid</span><span class="ph">Spread</span>
+      <span class="pc pl">YES</span><span class="pc">0.650</span><span class="pc">0.600</span><span class="pc ps ok">8.0%</span>
+      <span class="pc pl">NO</span><span class="pc">0.380</span><span class="pc">0.340</span><span class="pc ps ok">10.8%</span>
+    </div>
+    <div class="card-foot"><span>Updated 09:47:01 ET</span><span>—</span></div>
+  </div>
+
+  <div class="card signal-pos">
+    <div class="card-head">
+      <div class="ticker-wrap">
+        <div class="ticker">AMZN</div>
+        <div class="ticker-sub">Amazon.com, Inc.</div>
+      </div>
+      <div class="gap-pill down">▼ −57 bps</div>
+    </div>
+    <div class="edge-panel">
+      <div class="edge-top">
+        <span class="edge-label">BUY NO · Edge@Ask</span>
+        <span class="edge-val pos">+27.3%</span>
+      </div>
+      <div class="edge-sub">WR 83.0% · Entry $0.450 · Breakeven 45.5%</div>
+    </div>
+    <div class="prices">
+      <span class="ph"></span><span class="ph">Ask</span><span class="ph">Bid</span><span class="ph">Spread</span>
+      <span class="pc pl">YES</span><span class="pc">0.620</span><span class="pc">0.560</span><span class="pc ps ok">10.2%</span>
+      <span class="pc pl">NO</span><span class="pc">0.450</span><span class="pc">0.380</span><span class="pc ps bad">17.0%</span>
+    </div>
+    <div class="card-foot"><span>Updated 09:46:58 ET</span><span>Wide NO spread — check depth</span></div>
+  </div>
+
+  <div class="card signal-neg">
+    <div class="card-head">
+      <div class="ticker-wrap">
+        <div class="ticker">MSFT</div>
+        <div class="ticker-sub">Microsoft Corporation</div>
+      </div>
+      <div class="gap-pill up">▲ +109 bps</div>
+    </div>
+    <div class="edge-panel" style="border-color: rgba(248,113,113,0.3); background: rgba(248,113,113,0.04)">
+      <div class="edge-top">
+        <span class="edge-label" style="color: var(--red)">SKIP — Negative Edge</span>
+        <span class="edge-val neg">−21.4%</span>
+      </div>
+      <div class="edge-sub">WR 43.0% · Entry $0.640 YES — WR below breakeven</div>
+    </div>
+    <div class="prices">
+      <span class="ph"></span><span class="ph">Ask</span><span class="ph">Bid</span><span class="ph">Spread</span>
+      <span class="pc pl">YES</span><span class="pc">0.640</span><span class="pc">0.610</span><span class="pc ps good">4.8%</span>
+      <span class="pc pl">NO</span><span class="pc">0.360</span><span class="pc">0.340</span><span class="pc ps good">5.7%</span>
+    </div>
+    <div class="card-foot"><span>Updated 09:46:55 ET</span><span>Historical WR insufficient for gap-up</span></div>
+  </div>
+
+</div>
+</body>
+</html>

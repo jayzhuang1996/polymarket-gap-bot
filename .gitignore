@@ -38,5 +38,13 @@ Thumbs.db
 data/backups/
 *.backup
 
+# Data — large analytics / cache files (not needed at runtime)
+data/*.parquet
+data/full_session_2min.csv
+data/settlement_probability.csv
+data/twelvedata/
+data/live/
+# Keep: data/settlement_model.pkl, data/exit_model_calibration.csv, data/ticker_cids.json
+
 # Test files (keep in repo but ignore output)
 test_output/

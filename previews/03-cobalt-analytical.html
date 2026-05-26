@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gap Bot — Cobalt Analytical</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,600;0,700;1,300;1,400&family=Hanken+Grotesk:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --paper:  #F0EBDE;
+  --paper2: #E6E0CE;
+  --paper3: #D8D0BC;
+  --cobalt: #1F2BE0;
+  --cob2:   #5560E5;
+  --cob3:   rgba(31,43,224,0.12);
+  --ink:    #1a1c2e;
+  --ink2:   #5a6270;
+  --ink3:   #9aa0a8;
+  --green:  #15803d;
+  --red:    #b91c1c;
+  --amber:  #92400e;
+  --f-ser:  "Newsreader", Georgia, serif;
+  --f-sans: "Hanken Grotesk", sans-serif;
+  --f-mono: "DM Mono", monospace;
+}
+html, body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--f-sans);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+/* Graph paper grid */
+body {
+  background-image:
+    linear-gradient(to right, var(--cob3) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--cob3) 1px, transparent 1px);
+  background-size: 32px 32px;
+  padding: 36px 40px 52px;
+}
+
+/* ─── HEADER ─────────────────────────────────────────────────── */
+header { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 8px; }
+.top-rule { height: 2.5px; background: var(--cobalt); margin-bottom: 16px; }
+.bottom-header-rule { height: 1px; background: var(--cobalt); margin-bottom: 28px; margin-top: 16px; }
+.logo-main { font-family: var(--f-ser); font-weight: 700; font-size: 1.9rem; letter-spacing: -0.02em; color: var(--cobalt); line-height: 1; }
+.logo-main em { font-style: italic; font-weight: 300; }
+.logo-sub { font-family: var(--f-mono); font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink2); margin-top: 4px; }
+.header-right { text-align: right; }
+.ws-live { font-family: var(--f-mono); font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--cobalt); display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+.ws-live::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.hdate { font-family: var(--f-mono); font-size: 0.58rem; color: var(--ink3); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 4px; }
+
+/* ─── STATS ──────────────────────────────────────────────────── */
+.stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 0; border: 1.5px solid var(--cobalt); margin-bottom: 28px; background: var(--cobalt); }
+.stat { background: var(--paper); padding: 14px 18px; border-right: 1px solid var(--cobalt); }
+.stat:last-child { border-right: none; }
+.stat-n { font-family: var(--f-sans); font-weight: 700; font-size: 1.4rem; color: var(--cobalt); line-height: 1; }
+.stat-n.green { color: var(--green); }
+.stat-l { font-family: var(--f-mono); font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--ink3); margin-top: 4px; }
+
+/* ─── GRID ───────────────────────────────────────────────────── */
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+
+/* ─── CARD ───────────────────────────────────────────────────── */
+.card {
+  background: var(--paper);
+  border: 1.5px solid var(--cobalt);
+  padding: 18px 20px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+  position: relative;
+}
+.card::before {
+  content: attr(data-label);
+  position: absolute; top: 0; right: 0;
+  font-family: var(--f-mono); font-size: 0.52rem;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  background: var(--cobalt); color: white;
+  padding: 2px 8px;
+}
+.card.neg::before { background: var(--red); }
+
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; }
+.ticker { font-family: var(--f-ser); font-weight: 700; font-size: 1.45rem; color: var(--cobalt); letter-spacing: -0.02em; line-height: 1; }
+.tkname { font-family: var(--f-mono); font-size: 0.58rem; color: var(--ink3); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 3px; }
+
+.gap-badge {
+  font-family: var(--f-mono); font-size: 0.6rem; letter-spacing: 0.04em;
+  padding: 3px 9px; border: 1px solid; font-weight: 500;
+}
+.gap-badge.up   { color: var(--green); border-color: var(--green); background: rgba(21,128,61,0.07); }
+.gap-badge.down { color: var(--red);   border-color: var(--red);   background: rgba(185,28,28,0.07); }
+.gap-badge.flat { color: var(--ink3);  border-color: var(--paper3); }
+
+/* Edge strip */
+.edge-strip {
+  background: var(--cobalt); color: white;
+  padding: 10px 12px;
+  display: flex; justify-content: space-between; align-items: baseline;
+}
+.edge-strip.neg { background: var(--red); }
+.edge-trade { font-family: var(--f-mono); font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase; }
+.edge-num { font-family: var(--f-sans); font-weight: 700; font-size: 1.25rem; }
+.edge-detail { font-family: var(--f-mono); font-size: 0.56rem; color: rgba(26,28,46,0.7); letter-spacing: 0.04em; background: var(--paper2); padding: 5px 12px; }
+.edge-detail.neg-bg { background: rgba(185,28,28,0.06); color: var(--red); }
+
+/* Prices */
+.price-grid { display: grid; grid-template-columns: 32px 1fr 1fr 44px; font-family: var(--f-mono); font-size: 0.65rem; }
+.pg-h { color: var(--ink3); font-size: 0.53rem; text-transform: uppercase; letter-spacing: 0.1em; padding: 3px 0 4px; border-bottom: 1px solid var(--cobalt); }
+.pg-h:first-child { border-bottom: none; }
+.pg-c { padding: 4px 0; border-bottom: 1px solid var(--paper2); color: var(--ink); font-variant-numeric: tabular-nums; }
+.pg-l { color: var(--ink2); font-size: 0.59rem; }
+.pg-s.good { color: var(--green); font-weight: 500; }
+.pg-s.ok   { color: var(--amber); font-weight: 500; }
+.pg-s.bad  { color: var(--red); font-weight: 500; }
+
+.card-foot { font-family: var(--f-mono); font-size: 0.54rem; color: var(--ink3); border-top: 1px solid var(--paper3); padding-top: 8px; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+
+<div class="top-rule"></div>
+<header>
+  <div>
+    <div class="logo-main">Gap Bot <em>Live</em></div>
+    <div class="logo-sub">Polymarket · Finance Daily Markets · Gap Mispricing Monitor</div>
+  </div>
+  <div class="header-right">
+    <div class="ws-live">Live feed active</div>
+    <div class="hdate">May 22, 2026 · 09:47 ET</div>
+  </div>
+</header>
+<div class="bottom-header-rule"></div>
+
+<div class="stats-row">
+  <div class="stat"><div class="stat-n green">+$490</div><div class="stat-l">Cumul. P&amp;L</div></div>
+  <div class="stat"><div class="stat-n">50.0%</div><div class="stat-l">Win Rate</div></div>
+  <div class="stat"><div class="stat-n">12</div><div class="stat-l">Total Trades</div></div>
+  <div class="stat"><div class="stat-n">7 / 9</div><div class="stat-l">Markets Live</div></div>
+  <div class="stat"><div class="stat-n">0</div><div class="stat-l">Open Positions</div></div>
+</div>
+
+<div class="grid">
+
+  <div class="card" data-label="SIGNAL">
+    <div class="card-head">
+      <div><div class="ticker">SPX</div><div class="tkname">S&amp;P 500</div></div>
+      <div class="gap-badge down">▼ −30 bps</div>
+    </div>
+    <div class="edge-strip">
+      <span class="edge-trade">Buy NO</span>
+      <span class="edge-num">+58.2%</span>
+    </div>
+    <div class="edge-detail">WR 80.0% · Entry $0.220 NO · Breakeven 22.2%</div>
+    <div class="price-grid">
+      <span class="pg-h"></span><span class="pg-h">Ask</span><span class="pg-h">Bid</span><span class="pg-h">Sprd</span>
+      <span class="pg-c pg-l">YES</span><span class="pg-c">0.820</span><span class="pg-c">0.779</span><span class="pg-c pg-s ok">5.1%</span>
+      <span class="pg-c pg-l">NO</span><span class="pg-c">0.220</span><span class="pg-c">0.180</span><span class="pg-c pg-s good">4.2%</span>
+    </div>
+    <div class="card-foot"><span>09:47:12 ET</span><span>Spreads tight</span></div>
+  </div>
+
+  <div class="card" data-label="SIGNAL">
+    <div class="card-head">
+      <div><div class="ticker">NVDA</div><div class="tkname">NVIDIA</div></div>
+      <div class="gap-badge down">▼ −53 bps</div>
+    </div>
+    <div class="edge-strip">
+      <span class="edge-trade">Buy NO</span>
+      <span class="edge-num">+23.4%</span>
+    </div>
+    <div class="edge-detail">WR 65.0% · Entry $0.400 NO · Breakeven 40.4%</div>
+    <div class="price-grid">
+      <span class="pg-h"></span><span class="pg-h">Ask</span><span class="pg-h">Bid</span><span class="pg-h">Sprd</span>
+      <span class="pg-c pg-l">YES</span><span class="pg-c">0.630</span><span class="pg-c">0.598</span><span class="pg-c pg-s ok">5.1%</span>
+      <span class="pg-c pg-l">NO</span><span class="pg-c">0.400</span><span class="pg-c">0.370</span><span class="pg-c pg-s ok">7.9%</span>
+    </div>
+    <div class="card-foot"><span>09:47:08 ET</span><span>—</span></div>
+  </div>
+
+  <div class="card" data-label="SIGNAL">
+    <div class="card-head">
+      <div><div class="ticker">TSLA</div><div class="tkname">Tesla</div></div>
+      <div class="gap-badge up">▲ +118 bps</div>
+    </div>
+    <div class="edge-strip">
+      <span class="edge-trade">Buy YES</span>
+      <span class="edge-num">+3.3%</span>
+    </div>
+    <div class="edge-detail">WR 75.0% · Entry $0.710 YES · Breakeven 71.7%</div>
+    <div class="price-grid">
+      <span class="pg-h"></span><span class="pg-h">Ask</span><span class="pg-h">Bid</span><span class="pg-h">Sprd</span>
+      <span class="pg-c pg-l">YES</span><span class="pg-c">0.710</span><span class="pg-c">0.674</span><span class="pg-c pg-s ok">5.2%</span>
+      <span class="pg-c pg-l">NO</span><span class="pg-c">0.290</span><span class="pg-c">0.260</span><span class="pg-c pg-s good">3.9%</span>
+    </div>
+    <div class="card-foot"><span>09:47:05 ET</span><span>Near min edge threshold</span></div>
+  </div>
+
+  <div class="card" data-label="SIGNAL">
+    <div class="card-head">
+      <div><div class="ticker">AAPL</div><div class="tkname">Apple</div></div>
+      <div class="gap-badge down">▼ −39 bps</div>
+    </div>
+    <div class="edge-strip">
+      <span class="edge-trade">Buy NO</span>
+      <span class="edge-num">+30.3%</span>
+    </div>
+    <div class="edge-detail">WR 71.0% · Entry $0.380 NO · Breakeven 38.4%</div>
+    <div class="price-grid">
+      <span class="pg-h"></span><span class="pg-h">Ask</span><span class="pg-h">Bid</span><span class="pg-h">Sprd</span>
+      <span class="pg-c pg-l">YES</span><span class="pg-c">0.650</span><span class="pg-c">0.600</span><span class="pg-c pg-s ok">8.0%</span>
+      <span class="pg-c pg-l">NO</span><span class="pg-c">0.380</span><span class="pg-c">0.340</span><span class="pg-c pg-s ok">10.8%</span>
+    </div>
+    <div class="card-foot"><span>09:47:01 ET</span><span>—</span></div>
+  </div>
+
+  <div class="card" data-label="SIGNAL">
+    <div class="card-head">
+      <div><div class="ticker">AMZN</div><div class="tkname">Amazon</div></div>
+      <div class="gap-badge down">▼ −57 bps</div>
+    </div>
+    <div class="edge-strip">
+      <span class="edge-trade">Buy NO</span>
+      <span class="edge-num">+27.3%</span>
+    </div>
+    <div class="edge-detail">WR 83.0% · Entry $0.450 NO · Breakeven 45.5%</div>
+    <div class="price-grid">
+      <span class="pg-h"></span><span class="pg-h">Ask</span><span class="pg-h">Bid</span><span class="pg-h">Sprd</span>
+      <span class="pg-c pg-l">YES</span><span class="pg-c">0.620</span><span class="pg-c">0.560</span><span class="pg-c pg-s ok">10.2%</span>
+      <span class="pg-c pg-l">NO</span><span class="pg-c">0.450</span><span class="pg-c">0.380</span><span class="pg-c pg-s bad">17.0%</span>
+    </div>
+    <div class="card-foot"><span>09:46:58 ET</span><span>Wide NO spread</span></div>
+  </div>
+
+  <div class="card neg" data-label="SKIP">
+    <div class="card-head">
+      <div><div class="ticker">MSFT</div><div class="tkname">Microsoft</div></div>
+      <div class="gap-badge up">▲ +109 bps</div>
+    </div>
+    <div class="edge-strip neg">
+      <span class="edge-trade">Negative Edge</span>
+      <span class="edge-num">−21.4%</span>
+    </div>
+    <div class="edge-detail neg-bg">WR 43.0% · Entry $0.640 YES · WR below 64.6% breakeven</div>
+    <div class="price-grid">
+      <span class="pg-h"></span><span class="pg-h">Ask</span><span class="pg-h">Bid</span><span class="pg-h">Sprd</span>
+      <span class="pg-c pg-l">YES</span><span class="pg-c">0.640</span><span class="pg-c">0.610</span><span class="pg-c pg-s good">4.8%</span>
+      <span class="pg-c pg-l">NO</span><span class="pg-c">0.360</span><span class="pg-c">0.340</span><span class="pg-c pg-s good">5.7%</span>
+    </div>
+    <div class="card-foot"><span>09:46:55 ET</span><span>Historical WR insufficient for gap-up</span></div>
+  </div>
+
+</div>
+</body>
+</html>

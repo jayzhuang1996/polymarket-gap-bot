@@ -1,395 +1,163 @@
-# Polymarket Tail-End Arbitrage Bot
+# Polymarket Gap Mispricing Bot
 
-A semi-automated trading bot for identifying and executing tail-end arbitrage opportunities on Polymarket prediction markets.
+Live 9-ticker paper trading bot that exploits a structural mispricing in Polymarket's daily stock binary markets. The market prices YES tokens at ~50-57¢ regardless of gap size; actual close win rates range from 17% (gap-down >2%) to 76% (gap-up >2%). Edge: +5-19% per trade before fees.
 
-**Target**: 8-15% monthly ROI with <30 minutes daily time commitment
+**Status:** Paper trading (local, Mac must be on). Railway + Supabase migration in progress to remove that constraint.
 
 ---
 
-## Quick Start
+## Architecture
 
-### Prerequisites
-- Python 3.10+
-- Polymarket account with funded wallet
-- Anthropic API key (Claude)
-- Telegram account
+```
+server.py                      ← FastAPI entrypoint + startup wiring (run this)
+│
+├── engine/
+│   ├── strategy.py            ← Entry gates (8 gates) + exit ladder (7 levels)
+│   ├── session.py             ← 2-min trading loop, reconcile on restart
+│   ├── clob_feed.py           ← Polymarket WebSocket + REST fallback
+│   ├── data_feed.py           ← Market discovery, gap calculation, stock price loop
+│   ├── state.py               ← Shared in-memory state (quotes, positions, WR cache)
+│   ├── exit_model.py          ← Calibration table: GFR × time × gap_size → token price
+│   ├── settlement_model.py    ← Logistic regression: P(win) at any intraday moment
+│   └── order_manager.py       ← CLOB order placement + fill tracking
+│
+├── database/
+│   ├── db.py                  ← SQLite schema + CRUD (decisions, outcomes, live_quotes)
+│   └── wr_store.py            ← Bayesian WR: 5-year OHLC priors + live Polymarket obs
+│
+├── api/
+│   ├── routes.py              ← HTTP endpoints (/api/live-quotes, /api/outcomes, etc.)
+│   └── ws.py                  ← WebSocket broadcast to dashboard
+│
+├── tools/
+│   ├── eod_pipeline.py        ← 4-step EOD pipeline (runs nightly at 4:20pm ET via launchd)
+│   ├── eod_update.py          ← Step 1: scrape Polymarket outcomes, update WR store
+│   ├── full_session_analysis.py   ← Rebuild full_session_2min.csv (57,470 rows)
+│   ├── calibrate_exit_model.py    ← Rebuild exit model calibration table
+│   ├── train_settlement_model.py  ← Retrain logistic regression
+│   ├── scrape_history.py      ← Backfill Polymarket trade history via Gamma API
+│   └── oos_validation.py      ← Out-of-sample edge validation (run monthly)
+│
+├── config.py                  ← All constants (thresholds, sizing, VIX, SPRT, Kelly)
+├── index.html                 ← Browser dashboard (9-card live signal view)
+└── data/
+    ├── polymarket.db          ← SQLite (decisions, outcomes, win rates, live quotes)
+    ├── settlement_model.pkl   ← Trained model bundle
+    └── full_session_2min.csv  ← 57,470 rows of historical 2-min Polymarket sessions
+```
 
-### Installation
+---
+
+## How to Run
 
 ```bash
-# Clone repository
-git clone <repo-url>
-cd polymarket_bot
-
 # Install dependencies
 pip install -r requirements.txt
 
-# Configure environment
-cp .env.example .env
-# Edit .env with your API keys
+# Start server (run each market day before 9:35am ET)
+python server.py   # Dashboard → http://localhost:8000
+
+# EOD pipeline runs automatically at 4:20pm ET via launchd
+# Manual run: python tools/eod_pipeline.py
+
+# Retrain settlement model (periodically as data accumulates)
+python tools/train_settlement_model.py
+
+# Out-of-sample validation (monthly)
+python tools/oos_validation.py
 ```
 
-### Configuration
-
+**Install launchd agents (one-time):**
 ```bash
-# Required environment variables
-POLYMARKET_PRIVATE_KEY=0x...
-ANTHROPIC_API_KEY=sk-ant-...
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_CHAT_ID=...
-BANKROLL_USD=5000
-```
-
-### Run
-
-```bash
-# Start the bot
-python main.py
-
-# Or run in background
-nohup python main.py > /dev/null 2>&1 &
+cp deploy/com.polymarket.eod_update.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.polymarket.eod_update.plist
+cp deploy/com.polymarket.server.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.polymarket.server.plist
 ```
 
 ---
 
-## Project Structure
+## Data Flow
 
 ```
-polymarket_bot/
-├── config.py              # Configuration and environment variables
-├── collectors/            # Data collection modules
-│   └── polymarket_api.py  # Polymarket API wrapper
-├── tests/                 # Test scripts
-│   ├── test_api_stability.py
-│   └── test_polymarket_connection.py
-├── docs/                  # Documentation
-│   ├── SPEC.md
-│   ├── ARCHITECTURE.md
-│   ├── REFERENCE.md
-│   ├── TEMPLATES.md
-│   └── RUNBOOK.md
-├── .env.example           # Environment variables template
-├── requirements.txt       # Python dependencies
-├── CLAUDE.md             # Development guidelines
-├── TODO.md               # Task breakdown (103 tasks)
-└── README.md             # This file
+9:30am ET open
+│
+├── yfinance OHLC → gap_bps per ticker (startup, once)
+├── Polymarket Gamma API → discover YES/NO token IDs (startup, once)
+├── Bayesian WR blend → adj_wr per ticker (startup, once)
+└── Crash recovery → reconcile open DB positions into memory (startup, once)
+                           ↓
+         Polymarket CLOB WebSocket (sub-second)
+         REST fallback every 25 seconds
+                           ↓ yes_bid, yes_ask, depth
+         yfinance stock price every 5 seconds → GFR
+                           ↓
+         ┌─── 2-minute trading loop ────────────────────────────────┐
+         │                                                           │
+         │  For each ticker:                                         │
+         │    Entry check (8 gates): gap threshold → GFR signal →   │
+         │      SPRT/3-of-4 conviction → price band → edge → spread │
+         │      → VIX regime → Kelly sizing → LOG to DB             │
+         │                                                           │
+         │    Exit check (7 levels): time exits (2pm/2:30pm/3pm) →  │
+         │      GFR reversal (YES only) → NO profit lock + trail →  │
+         │      settlement model P(win) → LOG to DB                 │
+         └───────────────────────────────────────────────────────────┘
+                           ↓ 4:20pm ET
+         EOD pipeline: scrape outcomes → update WR → rebuild models
 ```
 
 ---
 
-## Documentation Structure
+## Key Parameters
 
-This project follows a 7-document structure for clarity:
-
-### 📘 Core Documents (Read These First)
-
-1. **[docs/SPEC.md](docs/SPEC.md)** - Business requirements and trading strategy
-   - What is tail-end arbitrage?
-   - Entry requirements and risk management
-   - Performance targets
-   - Human-in-loop decision points
-
-2. **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** - High-level system design
-   - Component overview with diagrams
-   - Data flow between modules
-   - 7-layer architecture explanation
-   - Project structure
-
-3. **[CLAUDE.md](CLAUDE.md)** - Development guidelines
-   - Incremental development principles
-   - Testing philosophy
-   - Communication protocols
-   - Code style guidelines
-
-4. **[TODO.md](TODO.md)** - Detailed task breakdown
-   - 185+ granular tasks across 9 components
-   - Estimated time for each task
-   - Sequential development order
-
-### 📚 Reference Documents (Lookup When Needed)
-
-5. **[docs/REFERENCE.md](docs/REFERENCE.md)** - Technical reference
-   - Database schemas (SQL)
-   - API endpoints and authentication
-   - Configuration parameters
-   - Filter specifications
-   - Position sizing formulas
-   - Stop-loss calculations
-
-6. **[docs/TEMPLATES.md](docs/TEMPLATES.md)** - Code & message templates
-   - Telegram message templates (morning reports, alerts)
-   - Claude AI prompt templates
-   - Code examples (scanning, executing, monitoring)
-   - Bot command handlers
-
-7. **[docs/RUNBOOK.md](docs/RUNBOOK.md)** - Operational procedures
-   - Daily operations checklist
-   - Weekly/monthly maintenance
-   - Troubleshooting guide
-   - Emergency procedures
-   - Useful commands reference
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Tickers | 9 (SPX, NVDA, TSLA, AAPL, AMZN, GOOGL, META, MSFT, NFLX) | |
+| Gap threshold | Beta-scaled: 0.50% (SPX) → 1.50% (NFLX) | `TICKER_GAP_THRESHOLD` |
+| Entry window | 9:35am – 12:00pm ET | Hard freeze at noon |
+| Min edge | 3% standard / 8% after 10:30am / 10% Thursday | Dynamic per regime |
+| Position sizing | Quarter-Kelly on 90% CI lower bound | Max $100, 6 positions max |
+| Daily loss limit | $500 | Stops all trading for the day |
+| GFR exit (YES) | −0.5 → sell 100% | Disabled for NO trades (43% WR at GFR < −0.5, not actionable) |
+| Time exits | 2:00pm / 2:30pm / 3:00pm ET | Tiered; 3pm is hard |
+| PRIOR_WEIGHT | 50 virtual obs | Bayesian weight on 5-year OHLC-derived priors |
+| SPRT | AMZN + TSLA YES only | LR ≥ 5.0 enter, ≤ 0.2 abort |
 
 ---
 
-## How It Works
+## Win Rate System
 
-### 1. Data Collection (Every 8 hours)
-- Polls Polymarket API for all markets
-- Scrapes news from RSS feeds (every 4 hours)
-- Stores in SQLite database
+Bayesian blend in `database/wr_store.py`:
+- **Prior:** 5-year daily OHLC → empirical gap-direction close WR per ticker. Worth 50 virtual observations.
+- **Live:** Each resolved Polymarket market appended nightly by `eod_pipeline.py`.
+- **Blend:** `adj_wr = (prior_wr × 50 + live_wr × N) / (50 + N)`. With N < 30, prior dominates entirely.
 
-### 2. Opportunity Detection (After each market collection)
-- 8-stage filter pipeline (price → liquidity → risk)
-- Scores opportunities by risk-adjusted return
-- Returns top 10 candidates
-
-### 3. AI Evaluation (Per opportunity)
-- Claude API evaluates each opportunity
-- Assesses certainty, risks, reversal scenarios
-- Returns: ENTER / SKIP / HUMAN_REVIEW
-
-### 4. Human Approval (Morning, ~10 min)
-- Telegram sends top 3-5 opportunities at 8 AM
-- Human reviews and approves/skips each
-- Commands: `/approve_1`, `/skip_2`, etc.
-
-### 5. Execution (On approval)
-- Calculates position size (1/4 Kelly Criterion)
-- Calculates adaptive stop-loss (8-18% based on volatility/liquidity)
-- Places entry order + stop-loss + take-profit orders
-- Stores position in database
-
-### 6. Monitoring (Every 60 seconds)
-- Tracks prices, liquidity, news for open positions
-- Auto-executes stop-loss and take-profit orders
-- Sends Telegram alerts for issues
-- Human decides on emergencies
+Real-time intraday adjustment: `adj_wr += 0.15 × gfr × direction_sign`
 
 ---
 
-## Daily Workflow
+## Settlement Model
 
-**Morning (8:00 AM)**:
-1. Receive Telegram morning report with top opportunities
-2. Review each opportunity (question, price, risk, AI reasoning)
-3. Approve or skip each one: `/approve_1 $350` or `/skip_1`
+Logistic regression predicting P(trade wins) at any intraday moment. Used for mid-session exits.
 
-**Throughout Day (As needed)**:
-- Respond to alerts (price drops, news, liquidity issues)
-- Decide: `/exit_1` (close position) or `/hold` (wait)
-
-**Evening (5:00 PM)**:
-- Check position dashboard: `/positions`
-- Review day's P/L
-
-**Weekly (Sunday)**:
-- Review performance report: `/weekly_report`
-- Adjust filter parameters if needed
-
-**Total Time**: <30 minutes per day
+- **Features:** `gfr`, `gfr_velocity`, `log(time_before_close)`, `abs(gap_pct)`, `market_p_win`, `dow_thu`, `vix_high`
+- **Exit triggers:** P(win) < 45% → sell 100%; live_edge < 0 → sell 80%
+- **AUC:** 0.8095 | **Brier:** 0.1654 | **Trained on:** 57,313 rows from `data/full_session_2min.csv` (GFR backfilled Oct 2025–Feb 2026 via Twelve Data)
 
 ---
 
-## System Architecture
+## Component Status
 
-```
-HUMAN (Telegram) ←→ BOT ←→ POLYMARKET
-        ↓              ↓
-    Commands      Monitoring
-        ↓              ↓
-    Approval ←→ Opportunities ←→ Data Collection
-        ↓              ↓
-    Execution ←→ AI Decision ←→ News/Prices
-        ↓              ↓
-    Positions ←→ Database ←→ History
-```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed component design.
-
----
-
-## Tech Stack
-
-- **Python 3.10+** - Main language
-- **py-clob-client** - Polymarket API wrapper
-- **anthropic** - Claude AI for decision-making
-- **python-telegram-bot** - User interface
-- **SQLite** - Local database
-- **APScheduler** - Task scheduling
-- **pandas** - Data manipulation
-- **feedparser** - News scraping
-
-See [docs/REFERENCE.md](docs/REFERENCE.md) for complete API details.
-
----
-
-## Project Status
-
-**Current Phase**: Documentation complete, ready for development
-
-**Next Steps**:
-1. Review all documentation
-2. Begin Component 1: Data Collection (see [TODO.md](TODO.md))
-3. Follow incremental development approach (see [CLAUDE.md](CLAUDE.md))
-
-**Timeline**: 4 weeks (80-100 hours total)
-- Week 1: Data collection + Database
-- Week 2: Filters + Scoring + AI
-- Week 3: Execution + Monitoring
-- Week 4: Telegram + Integration + Deployment
-
----
-
-## Key Features
-
-✅ **Semi-Automated** - Human approves trades, bot executes and monitors
-✅ **AI-Powered** - Claude evaluates opportunities for hidden risks
-✅ **Risk Management** - Adaptive stop-losses, portfolio limits, category diversification
-✅ **Real-Time Monitoring** - Price, liquidity, and news tracking every 60 seconds
-✅ **Telegram Interface** - All interactions via mobile app
-✅ **Comprehensive Testing** - Unit, integration, and smoke tests
-✅ **Production-Ready** - Error handling, logging, backups, recovery procedures
-
----
-
-## Performance Targets
-
-**Financial**:
-- Win rate: ≥70%
-- Monthly ROI: 8-15%
-- Max drawdown: <20%
-- Average trade: 4-6% profit, 1-3 day hold
-
-**Operational**:
-- Daily opportunities: 3-5 quality candidates
-- Time commitment: <30 min/day
-- Bot uptime: 99%+
-
-See [docs/SPEC.md](docs/SPEC.md) for detailed success criteria.
-
----
-
-## Risk Scenarios
-
-The system mitigates 5 key risk scenarios:
-
-1. **Liquidity Evaporation** - Only enter markets with 10x liquidity, alert on decay
-2. **Oracle Manipulation** - Skip subjective criteria, track dispute rates
-3. **Correlation Cascade** - Limit category exposure to 40%
-4. **Black Swan Reversal** - Require event finality, official confirmation
-5. **Manipulation Window** - Don't enter <6h to settlement, widen stops
-
-See [docs/SPEC.md](docs/SPEC.md#risk-scenarios--mitigation) for detailed mitigation strategies.
-
----
-
-## Development Guidelines
-
-**Follow these principles** (see [CLAUDE.md](CLAUDE.md)):
-
-1. ✅ **Incremental** - Write 10-50 lines, test, then proceed
-2. ✅ **Test Everything** - Every function tested before moving on
-3. ✅ **Ask When Uncertain** - Don't guess, clarify requirements
-4. ✅ **Security First** - Never hardcode API keys, always use .env
-5. ✅ **Follow TODO** - Complete tasks in exact order: 1.1.1 → 1.1.2 → 1.1.3
-
-**This is real money. Code quality, testing, and safety are paramount.**
-
----
-
-## Troubleshooting
-
-See [docs/RUNBOOK.md](docs/RUNBOOK.md) for:
-- Common issues and solutions
-- Bot not running
-- No opportunities found
-- Orders not executing
-- Stop-loss not triggering
-- Database corruption recovery
-
----
-
-## Maintenance
-
-**Daily**: Check morning report, respond to alerts
-**Weekly**: Review performance, adjust parameters
-**Monthly**: Financial analysis, cost review, dependency updates
-
-See [docs/RUNBOOK.md](docs/RUNBOOK.md#maintenance-schedule) for detailed procedures.
-
----
-
-## Contributing
-
-This is a personal trading bot. For questions or issues:
-
-1. Check [docs/RUNBOOK.md](docs/RUNBOOK.md) troubleshooting section
-2. Review logs: `tail -f logs/bot.log`
-3. Consult relevant documentation
-
----
-
-## Resources
-
-- **Polymarket**: https://polymarket.com
-- **Polymarket Docs**: https://docs.polymarket.com
-- **Anthropic (Claude)**: https://console.anthropic.com
-- **Telegram Bot API**: https://core.telegram.org/bots/api
-
----
-
-## License
-
-Private project. All rights reserved.
-
----
-
-## Version History
-
-**v1.0** - Documentation complete (Current)
-- 7-document structure
-- 185+ task breakdown
-- Ready for development
-
-**v2.0** - MVP (Target: Week 2)
-- Data collection working
-- Manual trade execution
-
-**v3.0** - Automation (Target: Week 4)
-- Full automation with Telegram interface
-- Ready for paper trading
-
-**v4.0** - Production (Target: Week 6+)
-- Live trading with real money
-- Monitoring and optimization
-
----
-
-## Getting Started
-
-1. **Read documentation in this order**:
-   - [docs/SPEC.md](docs/SPEC.md) - Understand the strategy
-   - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - Understand the system
-   - [CLAUDE.md](CLAUDE.md) - Understand development approach
-   - [TODO.md](TODO.md) - See task breakdown
-
-2. **Set up environment**:
-   - Install Python 3.10+
-   - Create virtual environment
-   - Install dependencies
-   - Configure .env file
-
-3. **Start development**:
-   - Begin with TODO Task 1.1.1
-   - Follow incremental approach
-   - Test after each task
-   - Mark tasks complete as you go
-
-4. **Questions?**
-   - Reference [docs/REFERENCE.md](docs/REFERENCE.md) for technical details
-   - Reference [docs/TEMPLATES.md](docs/TEMPLATES.md) for code examples
-   - Reference [docs/RUNBOOK.md](docs/RUNBOOK.md) for operations
-
----
-
-**Ready to build? Start with Task 1.1.1 in [TODO.md](TODO.md)!** 🚀
+| Component | Status |
+|-----------|--------|
+| Data pipeline (1,355 Polymarket observations, Oct 2025–present) | Done |
+| 3-gate scanner + SPRT (AMZN/TSLA) | Done |
+| VIX regime filter | Done |
+| GFR-based exit ladder (direction-asymmetric) | Done |
+| NO trade protection (profit lock + trailing stop) | Done |
+| Settlement model (AUC 0.8095, Brier 0.1654) | Done |
+| Session crash recovery (reconcile on restart) | Done |
+| EOD pipeline (4-step, launchd automated) | Done |
+| Live WebSocket dashboard | Done |
+| Railway deploy (24/7 uptime, no Mac required) | In progress |
+| Supabase migration (SQLite → PostgreSQL) | In progress |
+| Live order execution | Not started |

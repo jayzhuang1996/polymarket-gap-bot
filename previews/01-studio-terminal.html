@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gap Bot — Studio Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700;900&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:      #1c1c1c;
+  --bg-alt:  #242422;
+  --bg-card: #1e1e1c;
+  --yellow:  #f5d200;
+  --y60:     rgba(245,210,0,0.60);
+  --y30:     rgba(245,210,0,0.28);
+  --y12:     rgba(245,210,0,0.10);
+  --border:  #2a2a28;
+  --green:   #3fb950;
+  --red:     #f85149;
+  --amber:   #e3a008;
+  --white:   #f0f6fc;
+  --f-disp:  "Barlow", sans-serif;
+  --f-mono:  "IBM Plex Mono", monospace;
+}
+html, body { background: var(--bg); color: var(--yellow); font-family: var(--f-disp); min-height: 100vh; -webkit-font-smoothing: antialiased; }
+body { padding: 28px 36px 48px; }
+
+/* ─── HEADER ─────────────────────────────────────────────────── */
+header {
+  display: flex; align-items: center; gap: 20px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 16px; margin-bottom: 24px;
+}
+.logo {
+  font-weight: 900; font-size: 1.55rem; letter-spacing: -0.03em;
+  text-transform: uppercase; color: var(--yellow);
+  display: flex; align-items: center; gap: 10px;
+}
+.logo-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green); flex-shrink: 0;
+  box-shadow: 0 0 8px var(--green);
+}
+.logo-dot.off { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.header-meta { margin-left: auto; display: flex; align-items: center; gap: 24px; }
+.hm { font-family: var(--f-mono); font-size: 0.65rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--y60); }
+.hm strong { color: var(--yellow); }
+
+/* ─── STATS BAR ──────────────────────────────────────────────── */
+.stats-bar {
+  display: grid; grid-template-columns: repeat(5, 1fr);
+  gap: 1px; background: var(--border);
+  border: 1px solid var(--border);
+  margin-bottom: 24px;
+}
+.stat-cell {
+  background: var(--bg-card); padding: 14px 18px 12px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.stat-val {
+  font-weight: 900; font-size: 1.55rem; letter-spacing: -0.03em;
+  line-height: 1;
+}
+.stat-val.green { color: var(--green); }
+.stat-val.red   { color: var(--red); }
+.stat-val.white { color: var(--white); }
+.stat-val.yellow { color: var(--yellow); }
+.stat-lbl { font-family: var(--f-mono); font-size: 0.58rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--y30); }
+
+/* ─── GRID ───────────────────────────────────────────────────── */
+.grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); }
+@media (max-width: 1000px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 600px)  { .grid { grid-template-columns: 1fr; } }
+
+/* ─── CARD ───────────────────────────────────────────────────── */
+.card {
+  background: var(--bg-card); padding: 18px 20px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+  position: relative; overflow: hidden;
+}
+.card::before {
+  content: '';
+  position: absolute; top: 0; left: 0; right: 0; height: 2px;
+  background: transparent;
+}
+.card.signal-buy::before  { background: var(--green); }
+.card.signal-skip::before { background: var(--border); }
+.card.signal-neg::before  { background: var(--red); }
+
+/* Top row */
+.card-head { display: flex; align-items: flex-start; justify-content: space-between; }
+.ticker-block {}
+.ticker { font-weight: 900; font-size: 1.5rem; letter-spacing: -0.03em; text-transform: uppercase; color: var(--yellow); line-height: 1; }
+.ticker-name { font-family: var(--f-mono); font-size: 0.6rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--y30); margin-top: 3px; }
+
+/* Gap badge */
+.gap-tag {
+  font-family: var(--f-mono); font-size: 0.62rem; letter-spacing: 0.04em;
+  padding: 3px 8px; border: 1px solid;
+  text-transform: uppercase;
+}
+.gap-up   { color: var(--green); border-color: var(--green); background: rgba(63,185,80,0.08); }
+.gap-down { color: var(--red);   border-color: var(--red);   background: rgba(248,81,73,0.08); }
+.gap-flat { color: var(--y30);   border-color: var(--border);}
+
+/* Signal / Edge block */
+.signal-block {
+  border: 1px solid var(--border); padding: 10px 12px;
+  background: var(--y12);
+}
+.signal-row { display: flex; align-items: baseline; justify-content: space-between; }
+.signal-trade {
+  font-family: var(--f-mono); font-size: 0.6rem; letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.signal-trade.buy-yes { color: var(--green); }
+.signal-trade.buy-no  { color: var(--green); }
+.signal-trade.skip    { color: var(--y30); }
+.signal-edge { font-weight: 900; font-size: 1.35rem; letter-spacing: -0.03em; }
+.signal-edge.pos { color: var(--green); }
+.signal-edge.neg { color: var(--red); }
+.signal-wr {
+  font-family: var(--f-mono); font-size: 0.6rem;
+  color: var(--y60); letter-spacing: 0.04em; margin-top: 3px;
+}
+
+/* Price table */
+.price-table { display: grid; grid-template-columns: 36px 1fr 1fr 48px; gap: 0; font-family: var(--f-mono); font-size: 0.68rem; }
+.pt-h { color: var(--y30); text-transform: uppercase; letter-spacing: 0.07em; font-size: 0.55rem; padding: 4px 0 3px; border-bottom: 1px solid var(--border); }
+.pt-h:first-child { border-bottom: none; }
+.pt-c { padding: 3px 0; border-bottom: 1px solid rgba(46,46,44,0.6); font-variant-numeric: tabular-nums; color: var(--white); }
+.pt-lbl { color: var(--y60); font-size: 0.6rem; }
+.pt-spr.good { color: var(--green); }
+.pt-spr.ok   { color: var(--amber); }
+.pt-spr.bad  { color: var(--red); }
+
+/* Footer */
+.card-foot { font-family: var(--f-mono); font-size: 0.55rem; color: var(--y30); letter-spacing: 0.04em; border-top: 1px solid var(--border); padding-top: 8px; display: flex; justify-content: space-between; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    GAP BOT
+  </div>
+  <div class="header-meta">
+    <div class="hm">DATE <strong>MAY 22 2026</strong></div>
+    <div class="hm">MARKETS <strong>9 / 9</strong></div>
+    <div class="hm">STATUS <strong style="color:var(--green)">LIVE</strong></div>
+  </div>
+</header>
+
+<div class="stats-bar">
+  <div class="stat-cell">
+    <span class="stat-val green">+$490</span>
+    <span class="stat-lbl">Total P&L</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-val white">50%</span>
+    <span class="stat-lbl">Win Rate</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-val white">12</span>
+    <span class="stat-lbl">Total Trades</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-val white">7</span>
+    <span class="stat-lbl">Live Markets</span>
+  </div>
+  <div class="stat-cell">
+    <span class="stat-val white">09:47</span>
+    <span class="stat-lbl">Last Update ET</span>
+  </div>
+</div>
+
+<div class="grid" id="grid">
+
+  <!-- SPX -->
+  <div class="card signal-buy">
+    <div class="card-head">
+      <div class="ticker-block">
+        <div class="ticker">SPX</div>
+        <div class="ticker-name">S&amp;P 500</div>
+      </div>
+      <div class="gap-tag gap-down">▼ −30 bps</div>
+    </div>
+    <div class="signal-block">
+      <div class="signal-row">
+        <span class="signal-trade buy-no">BUY NO</span>
+        <span class="signal-edge pos">+58.2%</span>
+      </div>
+      <div class="signal-wr">WR 80.0% · Entry $0.220 NO</div>
+    </div>
+    <div class="price-table">
+      <span class="pt-h"></span><span class="pt-h">ASK</span><span class="pt-h">BID</span><span class="pt-h">SPRD</span>
+      <span class="pt-c pt-lbl">YES</span><span class="pt-c">0.820</span><span class="pt-c">0.779</span><span class="pt-c pt-spr ok">5.1%</span>
+      <span class="pt-c pt-lbl">NO</span><span class="pt-c">0.220</span><span class="pt-c">0.180</span><span class="pt-c pt-spr good">4.2%</span>
+    </div>
+    <div class="card-foot"><span>UPDATED 09:47:12 ET</span><span>SPREADS TIGHT</span></div>
+  </div>
+
+  <!-- NVDA -->
+  <div class="card signal-buy">
+    <div class="card-head">
+      <div class="ticker-block">
+        <div class="ticker">NVDA</div>
+        <div class="ticker-name">NVIDIA</div>
+      </div>
+      <div class="gap-tag gap-down">▼ −53 bps</div>
+    </div>
+    <div class="signal-block">
+      <div class="signal-row">
+        <span class="signal-trade buy-no">BUY NO</span>
+        <span class="signal-edge pos">+23.4%</span>
+      </div>
+      <div class="signal-wr">WR 65.0% · Entry $0.400 NO</div>
+    </div>
+    <div class="price-table">
+      <span class="pt-h"></span><span class="pt-h">ASK</span><span class="pt-h">BID</span><span class="pt-h">SPRD</span>
+      <span class="pt-c pt-lbl">YES</span><span class="pt-c">0.630</span><span class="pt-c">0.598</span><span class="pt-c pt-spr ok">5.1%</span>
+      <span class="pt-c pt-lbl">NO</span><span class="pt-c">0.400</span><span class="pt-c">0.370</span><span class="pt-c pt-spr ok">7.9%</span>
+    </div>
+    <div class="card-foot"><span>UPDATED 09:47:08 ET</span><span>—</span></div>
+  </div>
+
+  <!-- TSLA -->
+  <div class="card signal-buy">
+    <div class="card-head">
+      <div class="ticker-block">
+        <div class="ticker">TSLA</div>
+        <div class="ticker-name">TESLA</div>
+      </div>
+      <div class="gap-tag gap-up">▲ +118 bps</div>
+    </div>
+    <div class="signal-block">
+      <div class="signal-row">
+        <span class="signal-trade buy-yes">BUY YES</span>
+        <span class="signal-edge pos">+3.3%</span>
+      </div>
+      <div class="signal-wr">WR 75.0% · Entry $0.710 YES</div>
+    </div>
+    <div class="price-table">
+      <span class="pt-h"></span><span class="pt-h">ASK</span><span class="pt-h">BID</span><span class="pt-h">SPRD</span>
+      <span class="pt-c pt-lbl">YES</span><span class="pt-c">0.710</span><span class="pt-c">0.674</span><span class="pt-c pt-spr ok">5.2%</span>
+      <span class="pt-c pt-lbl">NO</span><span class="pt-c">0.290</span><span class="pt-c">0.260</span><span class="pt-c pt-spr good">3.9%</span>
+    </div>
+    <div class="card-foot"><span>UPDATED 09:47:05 ET</span><span>NEAR THRESHOLD</span></div>
+  </div>
+
+  <!-- AAPL -->
+  <div class="card signal-buy">
+    <div class="card-head">
+      <div class="ticker-block">
+        <div class="ticker">AAPL</div>
+        <div class="ticker-name">APPLE</div>
+      </div>
+      <div class="gap-tag gap-down">▼ −39 bps</div>
+    </div>
+    <div class="signal-block">
+      <div class="signal-row">
+        <span class="signal-trade buy-no">BUY NO</span>
+        <span class="signal-edge pos">+30.3%</span>
+      </div>
+      <div class="signal-wr">WR 71.0% · Entry $0.380 NO</div>
+    </div>
+    <div class="price-table">
+      <span class="pt-h"></span><span class="pt-h">ASK</span><span class="pt-h">BID</span><span class="pt-h">SPRD</span>
+      <span class="pt-c pt-lbl">YES</span><span class="pt-c">0.650</span><span class="pt-c">0.600</span><span class="pt-c pt-spr ok">8.0%</span>
+      <span class="pt-c pt-lbl">NO</span><span class="pt-c">0.380</span><span class="pt-c">0.340</span><span class="pt-c pt-spr ok">10.8%</span>
+    </div>
+    <div class="card-foot"><span>UPDATED 09:47:01 ET</span><span>—</span></div>
+  </div>
+
+  <!-- AMZN -->
+  <div class="card signal-buy">
+    <div class="card-head">
+      <div class="ticker-block">
+        <div class="ticker">AMZN</div>
+        <div class="ticker-name">AMAZON</div>
+      </div>
+      <div class="gap-tag gap-down">▼ −57 bps</div>
+    </div>
+    <div class="signal-block">
+      <div class="signal-row">
+        <span class="signal-trade buy-no">BUY NO</span>
+        <span class="signal-edge pos">+27.3%</span>
+      </div>
+      <div class="signal-wr">WR 83.0% · Entry $0.550 NO</div>
+    </div>
+    <div class="price-table">
+      <span class="pt-h"></span><span class="pt-h">ASK</span><span class="pt-h">BID</span><span class="pt-h">SPRD</span>
+      <span class="pt-c pt-lbl">YES</span><span class="pt-c">0.620</span><span class="pt-c">0.560</span><span class="pt-c pt-spr ok">10.2%</span>
+      <span class="pt-c pt-lbl">NO</span><span class="pt-c">0.450</span><span class="pt-c">0.380</span><span class="pt-c pt-spr bad">17.0%</span>
+    </div>
+    <div class="card-foot"><span>UPDATED 09:46:58 ET</span><span>WIDE NO SPREAD</span></div>
+  </div>
+
+  <!-- MSFT -->
+  <div class="card signal-neg">
+    <div class="card-head">
+      <div class="ticker-block">
+        <div class="ticker">MSFT</div>
+        <div class="ticker-name">MICROSOFT</div>
+      </div>
+      <div class="gap-tag gap-up">▲ +109 bps</div>
+    </div>
+    <div class="signal-block" style="background:rgba(248,81,73,0.06); border-color: rgba(248,81,73,0.3)">
+      <div class="signal-row">
+        <span class="signal-trade skip" style="color:var(--red)">SKIP — NEG EDGE</span>
+        <span class="signal-edge neg">−21.4%</span>
+      </div>
+      <div class="signal-wr">WR 43.0% · Entry $0.640 YES — below breakeven</div>
+    </div>
+    <div class="price-table">
+      <span class="pt-h"></span><span class="pt-h">ASK</span><span class="pt-h">BID</span><span class="pt-h">SPRD</span>
+      <span class="pt-c pt-lbl">YES</span><span class="pt-c">0.640</span><span class="pt-c">0.610</span><span class="pt-c pt-spr good">4.8%</span>
+      <span class="pt-c pt-lbl">NO</span><span class="pt-c">0.360</span><span class="pt-c">0.340</span><span class="pt-c pt-spr good">5.7%</span>
+    </div>
+    <div class="card-foot"><span>UPDATED 09:46:55 ET</span><span>NEGATIVE EDGE</span></div>
+  </div>
+
+</div>
+
+</body>
+</html>

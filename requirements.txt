@@ -1,6 +1,9 @@
 # Polymarket API
 py-clob-client==0.27.0
 
+# WebSocket (Binance feed)
+websockets>=12.0
+
 # AI (Claude)
 anthropic>=0.40.0
 
@@ -8,7 +11,9 @@ anthropic>=0.40.0
 python-telegram-bot>=20.0
 
 # Database
-# (using built-in sqlite3, no package needed)
+# sqlite3 is built-in (local dev)
+# psycopg2-binary is for Railway/Supabase (PostgreSQL)
+psycopg2-binary>=2.9.0
 
 # Scheduling
 APScheduler>=3.10.0
