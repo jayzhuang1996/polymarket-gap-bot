@@ -17,6 +17,10 @@ from typing import Optional
 DATABASE_URL = os.getenv("DATABASE_URL")
 USE_PG = bool(DATABASE_URL)
 
+# Flipped to False by init_db() when the PG connection fails at startup.
+# _conn() checks this and falls back to SQLite so the server keeps running.
+_pg_available = True
+
 DB_PATH = os.getenv(
     "DATABASE_PATH",
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "polymarket.db"),
@@ -101,7 +105,7 @@ class _PgConn:
 
 
 def _conn():
-    if USE_PG:
+    if USE_PG and _pg_available:
         dsn = DATABASE_URL
         # Supabase requires SSL; append if not already specified
         if "sslmode" not in dsn:
@@ -125,25 +129,31 @@ def init_db():
     We just verify the connection and run safe ADD COLUMN IF NOT EXISTS migrations.
     On SQLite (local): full schema creation.
     """
+    global _pg_available
     if USE_PG:
-        # Tables exist; run additive column migrations only
-        conn = _conn()
         try:
-            for migration in [
-                "ALTER TABLE outcomes ADD COLUMN IF NOT EXISTS exit_price REAL",
-                "ALTER TABLE outcomes ADD COLUMN IF NOT EXISTS exit_type TEXT DEFAULT 'resolve'",
-                "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS adj_wr REAL",
-                "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS gfr_at_entry REAL",
-                "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS spread_at_entry REAL",
-            ]:
-                try:
-                    conn.execute(migration)
-                except Exception:
-                    pass
-            conn.commit()
-        finally:
-            conn.close()
-        return
+            conn = _conn()
+            try:
+                for migration in [
+                    "ALTER TABLE outcomes ADD COLUMN IF NOT EXISTS exit_price REAL",
+                    "ALTER TABLE outcomes ADD COLUMN IF NOT EXISTS exit_type TEXT DEFAULT 'resolve'",
+                    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS adj_wr REAL",
+                    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS gfr_at_entry REAL",
+                    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS spread_at_entry REAL",
+                ]:
+                    try:
+                        conn.execute(migration)
+                    except Exception:
+                        pass
+                conn.commit()
+            finally:
+                conn.close()
+            return
+        except Exception as e:
+            print(f"  WARNING: PostgreSQL unavailable ({e})")
+            print("  Falling back to SQLite — session data won't persist to Supabase.")
+            _pg_available = False
+            # fall through to SQLite init below
 
     # SQLite path — full schema creation
     conn = _conn()
