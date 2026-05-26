@@ -225,6 +225,25 @@ def init_db():
                 created_at      TEXT    NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_notifications_created ON notifications(created_at);
+            CREATE TABLE IF NOT EXISTS scan_log (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                date            TEXT    NOT NULL,
+                scanned_at      TEXT    NOT NULL,
+                ticker          TEXT    NOT NULL,
+                et_time         TEXT,
+                gap_bps         REAL,
+                yes_ask         REAL,
+                yes_bid         REAL,
+                adj_wr          REAL,
+                edge            REAL,
+                gfr             REAL,
+                gfr_velocity    REAL,
+                settlement_p_win REAL,
+                signal          TEXT    NOT NULL,
+                vix_change      REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_scan_log_date ON scan_log(date);
+            CREATE INDEX IF NOT EXISTS idx_scan_log_ticker ON scan_log(ticker);
         """)
         for migration in [
             "ALTER TABLE outcomes ADD COLUMN exit_price REAL",
