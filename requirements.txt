@@ -26,6 +26,12 @@ scikit-learn>=1.4.0
 # Market data
 yfinance>=0.2.40
 
+# Parquet support (trade history files)
+pyarrow>=14.0.0
+
+# NYSE holiday calendar (EOD pipeline)
+holidays>=0.46
+
 # HTTP requests
 requests>=2.31.0
 

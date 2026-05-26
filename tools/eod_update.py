@@ -221,9 +221,10 @@ def store_observation(d: date, display_name: str, gap_pct: float, close_up: bool
     c = _conn()
     try:
         c.execute("""
-            INSERT OR IGNORE INTO scraped_observations
+            INSERT INTO scraped_observations
                 (date, ticker, gap_pct, close_up, created_at)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (date, ticker) DO NOTHING
         """, (
             d.isoformat(), display_name, gap_pct,
             1 if close_up else 0,
