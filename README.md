@@ -2,27 +2,42 @@
 
 Live 9-ticker paper trading bot that exploits a structural mispricing in Polymarket's daily stock binary markets. The market prices YES tokens at ~50-57¢ regardless of gap size; actual close win rates range from 17% (gap-down >2%) to 76% (gap-up >2%). Edge: +5-19% per trade before fees.
 
-**Status:** Paper trading (local, Mac must be on). Railway + Supabase migration in progress to remove that constraint.
+**Status:** Paper trading live on Railway + Supabase. Mac not required during market hours.
+
+---
+
+## Infrastructure
+
+| Layer | What runs there |
+|-------|----------------|
+| **Railway** (server service) | `server.py` — 24/7, auto-restarts on crash |
+| **Railway** (cron service) | `tools/eod_update.py` — 4:20 PM ET weekdays |
+| **Supabase** (PostgreSQL) | All persistent state: decisions, outcomes, WR, live_quotes |
+| **Local Mac** | Monthly model retraining only (`tools/eod_pipeline.py --steps 2-4`) |
+
+Dashboard: `https://polymarket-gap-bot-production.up.railway.app`
+GitHub: `https://github.com/jayzhuang1996/polymarket-gap-bot`
 
 ---
 
 ## Architecture
 
 ```
-server.py                      ← FastAPI entrypoint + startup wiring (run this)
+server.py                      ← FastAPI entrypoint + startup wiring
 │
 ├── engine/
 │   ├── strategy.py            ← Entry gates (8 gates) + exit ladder (7 levels)
 │   ├── session.py             ← 2-min trading loop, reconcile on restart
-│   ├── clob_feed.py           ← Polymarket WebSocket + REST fallback
-│   ├── data_feed.py           ← Market discovery, gap calculation, stock price loop
+│   ├── clob_feed.py           ← Polymarket WebSocket + REST fallback (25s)
+│   ├── data_feed.py           ← Market discovery, gap calculation, stock price loop (5s)
 │   ├── state.py               ← Shared in-memory state (quotes, positions, WR cache)
 │   ├── exit_model.py          ← Calibration table: GFR × time × gap_size → token price
 │   ├── settlement_model.py    ← Logistic regression: P(win) at any intraday moment
-│   └── order_manager.py       ← CLOB order placement + fill tracking
+│   ├── sizer.py               ← Quarter-Kelly with 90% CI lower bound (scipy)
+│   └── order_manager.py       ← CLOB order placement + fill tracking (dry-run default)
 │
 ├── database/
-│   ├── db.py                  ← SQLite schema + CRUD (decisions, outcomes, live_quotes)
+│   ├── db.py                  ← Dual backend: SQLite (local) / PostgreSQL (Railway)
 │   └── wr_store.py            ← Bayesian WR: 5-year OHLC priors + live Polymarket obs
 │
 ├── api/
@@ -30,47 +45,21 @@ server.py                      ← FastAPI entrypoint + startup wiring (run this
 │   └── ws.py                  ← WebSocket broadcast to dashboard
 │
 ├── tools/
-│   ├── eod_pipeline.py        ← 4-step EOD pipeline (runs nightly at 4:20pm ET via launchd)
-│   ├── eod_update.py          ← Step 1: scrape Polymarket outcomes, update WR store
-│   ├── full_session_analysis.py   ← Rebuild full_session_2min.csv (57,470 rows)
+│   ├── eod_pipeline.py        ← 4-step EOD pipeline (local use only — models need parquet)
+│   ├── eod_update.py          ← Step 1: scrape outcomes, update WR (runs on Railway cron)
+│   ├── full_session_analysis.py   ← Rebuild full_session_2min.csv
 │   ├── calibrate_exit_model.py    ← Rebuild exit model calibration table
 │   ├── train_settlement_model.py  ← Retrain logistic regression
-│   ├── scrape_history.py      ← Backfill Polymarket trade history via Gamma API
+│   ├── scrape_history.py      ← Backfill Polymarket trade history
 │   └── oos_validation.py      ← Out-of-sample edge validation (run monthly)
 │
 ├── config.py                  ← All constants (thresholds, sizing, VIX, SPRT, Kelly)
+├── railway.toml               ← Railway deploy config (start command + restart policy)
 ├── index.html                 ← Browser dashboard (9-card live signal view)
 └── data/
-    ├── polymarket.db          ← SQLite (decisions, outcomes, win rates, live quotes)
-    ├── settlement_model.pkl   ← Trained model bundle
-    └── full_session_2min.csv  ← 57,470 rows of historical 2-min Polymarket sessions
-```
-
----
-
-## How to Run
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Start server (run each market day before 9:35am ET)
-python server.py   # Dashboard → http://localhost:8000
-
-# EOD pipeline runs automatically at 4:20pm ET via launchd
-# Manual run: python tools/eod_pipeline.py
-
-# Retrain settlement model (periodically as data accumulates)
-python tools/train_settlement_model.py
-
-# Out-of-sample validation (monthly)
-python tools/oos_validation.py
-```
-
-**Install launchd agents (one-time):**
-```bash
-cp deploy/com.polymarket.eod_update.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.polymarket.eod_update.plist
-cp deploy/com.polymarket.server.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.polymarket.server.plist
+    ├── settlement_model.pkl   ← Trained model bundle (committed to git, loaded at startup)
+    ├── exit_model_calibration.csv ← Exit price lookup table (committed, retrained monthly)
+    └── ticker_cids.json       ← Polymarket condition IDs per ticker
 ```
 
 ---
@@ -82,27 +71,29 @@ cp deploy/com.polymarket.server.plist ~/Library/LaunchAgents/ && launchctl load 
 │
 ├── yfinance OHLC → gap_bps per ticker (startup, once)
 ├── Polymarket Gamma API → discover YES/NO token IDs (startup, once)
-├── Bayesian WR blend → adj_wr per ticker (startup, once)
-└── Crash recovery → reconcile open DB positions into memory (startup, once)
+├── Supabase daily_wr → Bayesian WR blend → wr_cache (startup, once)
+└── Supabase decisions → reconcile open positions into memory (startup, once)
                            ↓
-         Polymarket CLOB WebSocket (sub-second)
-         REST fallback every 25 seconds
-                           ↓ yes_bid, yes_ask, depth
-         yfinance stock price every 5 seconds → GFR
+         Polymarket CLOB WebSocket (sub-second ticks)
+         REST fallback poll every 25 seconds
+                           ↓ yes_bid, yes_ask
+         Yahoo Finance stock price every 5 seconds → GFR, adj_wr
                            ↓
-         ┌─── 2-minute trading loop ────────────────────────────────┐
-         │                                                           │
-         │  For each ticker:                                         │
-         │    Entry check (8 gates): gap threshold → GFR signal →   │
-         │      SPRT/3-of-4 conviction → price band → edge → spread │
-         │      → VIX regime → Kelly sizing → LOG to DB             │
-         │                                                           │
-         │    Exit check (7 levels): time exits (2pm/2:30pm/3pm) →  │
-         │      GFR reversal (YES only) → NO profit lock + trail →  │
-         │      settlement model P(win) → LOG to DB                 │
-         └───────────────────────────────────────────────────────────┘
-                           ↓ 4:20pm ET
-         EOD pipeline: scrape outcomes → update WR → rebuild models
+         ┌─── 2-minute trading loop ──────────────────────────────────┐
+         │                                                             │
+         │  Entry (8 gates): gap threshold → GFR signal → SPRT       │
+         │    conviction → price band → edge → spread → VIX regime    │
+         │    → Kelly size → write to Supabase decisions              │
+         │                                                             │
+         │  Exit (7 levels): time exits (2pm/2:30pm/3pm) →           │
+         │    GFR reversal (YES only) → NO profit lock + trail →      │
+         │    settlement P(win) → write to Supabase outcomes          │
+         └─────────────────────────────────────────────────────────────┘
+                           ↓ 4:20pm ET (Railway cron)
+         eod_update.py: scrape outcomes → scraped_observations → daily_wr
+                           ↓ monthly (local Mac)
+         eod_pipeline.py: rebuild full_session_2min.csv → retrain models
+         → commit updated pkl + csv → Railway auto-deploys
 ```
 
 ---
@@ -114,10 +105,9 @@ cp deploy/com.polymarket.server.plist ~/Library/LaunchAgents/ && launchctl load 
 | Tickers | 9 (SPX, NVDA, TSLA, AAPL, AMZN, GOOGL, META, MSFT, NFLX) | |
 | Gap threshold | Beta-scaled: 0.50% (SPX) → 1.50% (NFLX) | `TICKER_GAP_THRESHOLD` |
 | Entry window | 9:35am – 12:00pm ET | Hard freeze at noon |
-| Min edge | 3% standard / 8% after 10:30am / 10% Thursday | Dynamic per regime |
+| Min edge | 5% standard / 8% after 10:30am / 10% Thursday | Dynamic per regime |
 | Position sizing | Quarter-Kelly on 90% CI lower bound | Max $100, 6 positions max |
-| Daily loss limit | $500 | Stops all trading for the day |
-| GFR exit (YES) | −0.5 → sell 100% | Disabled for NO trades (43% WR at GFR < −0.5, not actionable) |
+| GFR exit (YES) | −0.5 → sell 100% | Disabled for NO trades |
 | Time exits | 2:00pm / 2:30pm / 3:00pm ET | Tiered; 3pm is hard |
 | PRIOR_WEIGHT | 50 virtual obs | Bayesian weight on 5-year OHLC-derived priors |
 | SPRT | AMZN + TSLA YES only | LR ≥ 5.0 enter, ≤ 0.2 abort |
@@ -128,20 +118,19 @@ cp deploy/com.polymarket.server.plist ~/Library/LaunchAgents/ && launchctl load 
 
 Bayesian blend in `database/wr_store.py`:
 - **Prior:** 5-year daily OHLC → empirical gap-direction close WR per ticker. Worth 50 virtual observations.
-- **Live:** Each resolved Polymarket market appended nightly by `eod_pipeline.py`.
-- **Blend:** `adj_wr = (prior_wr × 50 + live_wr × N) / (50 + N)`. With N < 30, prior dominates entirely.
-
-Real-time intraday adjustment: `adj_wr += 0.15 × gfr × direction_sign`
+- **Live:** Each resolved Polymarket market appended nightly by `eod_update.py` (Railway cron).
+- **Blend:** `adj_wr = (prior_wr × 50 + live_wr × N) / (50 + N)`. With N < 30, prior dominates.
+- **Intraday:** `adj_wr += 0.15 × gfr × direction_sign` (real-time GFR adjustment every 5s)
 
 ---
 
 ## Settlement Model
 
-Logistic regression predicting P(trade wins) at any intraday moment. Used for mid-session exits.
+Logistic regression predicting P(trade wins) at any intraday moment.
 
 - **Features:** `gfr`, `gfr_velocity`, `log(time_before_close)`, `abs(gap_pct)`, `market_p_win`, `dow_thu`, `vix_high`
 - **Exit triggers:** P(win) < 45% → sell 100%; live_edge < 0 → sell 80%
-- **AUC:** 0.8095 | **Brier:** 0.1654 | **Trained on:** 57,313 rows from `data/full_session_2min.csv` (GFR backfilled Oct 2025–Feb 2026 via Twelve Data)
+- **AUC:** 0.8095 | **Brier:** 0.1654 | **Trained on:** 57,313 rows
 
 ---
 
@@ -149,15 +138,47 @@ Logistic regression predicting P(trade wins) at any intraday moment. Used for mi
 
 | Component | Status |
 |-----------|--------|
-| Data pipeline (1,355 Polymarket observations, Oct 2025–present) | Done |
-| 3-gate scanner + SPRT (AMZN/TSLA) | Done |
+| Data pipeline (1,355 Polymarket obs, Oct 2025–present) | Done |
+| 8-gate entry + SPRT (AMZN/TSLA) | Done |
 | VIX regime filter | Done |
 | GFR-based exit ladder (direction-asymmetric) | Done |
 | NO trade protection (profit lock + trailing stop) | Done |
 | Settlement model (AUC 0.8095, Brier 0.1654) | Done |
 | Session crash recovery (reconcile on restart) | Done |
-| EOD pipeline (4-step, launchd automated) | Done |
-| Live WebSocket dashboard | Done |
-| Railway deploy (24/7 uptime, no Mac required) | In progress |
-| Supabase migration (SQLite → PostgreSQL) | In progress |
+| Supabase migration (PostgreSQL, 8 tables, 12K+ rows) | Done |
+| Railway server deploy (24/7, auto-restart) | Done |
+| Railway EOD cron (4:20 PM ET weekdays) | Done |
 | Live order execution | Not started |
+
+---
+
+## Monthly Maintenance (local Mac)
+
+```bash
+# After 30+ new sessions have accumulated:
+
+# 1. Retrain models with new data
+python tools/eod_pipeline.py   # steps 2-4: rebuild session csv + retrain pkl + csv
+
+# 2. Run OOS validation
+python tools/oos_validation.py
+
+# 3. Commit updated artifacts and push → Railway auto-deploys
+git add data/settlement_model.pkl data/exit_model_calibration.csv
+git commit -m "chore: retrain models — [date]"
+git push
+```
+
+---
+
+## Environment Variables
+
+Set in Railway service Variables tab (not committed to git):
+
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` | Supabase PostgreSQL pooler URL |
+| `POLYMARKET_PRIVATE_KEY` | Wallet key (dry-run safe; only used when `LIVE_TRADING=true`) |
+| `LIVE_TRADING` | `false` for paper trading, `true` for real orders |
+| `BANKROLL_USD` | Total capital for Kelly sizing |
+| `PORT` | Auto-injected by Railway — do not set |

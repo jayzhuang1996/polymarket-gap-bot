@@ -2,7 +2,22 @@
 
 **Strategy:** Exploit Polymarket's daily stock binary markets. Market prices YES at ~50-57¢ regardless of gap size. Actual close win rates range 17–76% depending on gap direction and size. Edge: +5-19% per trade.
 
-**Status:** Paper trading ready. Data pipeline complete. Server with crash recovery live.
+**Status:** Paper trading live on Railway + Supabase as of May 26 2026. Mac not required during market hours.
+
+---
+
+## Known Risks — Address Before Live Trading
+
+### P0 — Fixed
+- [x] `scipy` missing from requirements.txt → Kelly used point estimates instead of 90% CI lower bound. **Fixed May 26.**
+
+### P1 — Fix Before November
+- [ ] **DST hardcode** — `ET_OFFSET_H = -4` in `engine/strategy.py` and `timedelta(hours=-4)` in `tools/eod_update.py`. Works for EDT (Mar–Nov). In EST (Nov–Mar), strategy clock runs 1 hour ahead: misses 9:30–10:30 AM entries, exits 1 hour late. Fix: use `pytz` or `zoneinfo` to derive offset dynamically.
+
+### P2 — Operational (non-blocking)
+- [ ] **No daily server restart** — `state.wr_cache` is loaded once at Railway startup and never refreshed. After EOD cron updates `daily_wr` in Supabase, the running server won't see it until next restart. Fix: add a Railway scheduled restart at 9:20 AM ET daily, or reload WR cache at start of each trading day inside `trading_session_loop`.
+- [ ] **Synthetic bid in REST fallback** — `periodic_rest_poll()` uses `p * 0.95` as a synthetic bid when WS hasn't provided real depth. Hardcodes a 5% spread. Real spread can be 10–20% in thin markets. Fix: use `(bid + ask) / 2` from the REST `/book` endpoint instead.
+- [ ] **`_ensure_obs_table()` DDL** — `INTEGER PRIMARY KEY AUTOINCREMENT` is SQLite-only syntax. Harmless since the table already exists in Supabase (`IF NOT EXISTS` skips it), but would fail if the PG schema were ever recreated. Fix: add PG branch same as `rebuild_priors()`.
 
 ---
 
@@ -10,76 +25,70 @@
 
 ### Pre-session setup
 - [x] Run `python -c "from database.wr_store import daily_update; daily_update()"` — win rates refreshed (120–137 obs per ticker, adj_wr 0.67–0.73)
-- [x] Install launchd plists — both `com.polymarket.server` and `com.polymarket.eod_update` registered and running
-- [x] `data/settlement_model.pkl` exists — AUC 0.8095, Brier 0.1654 (retrained on 57,313 rows, full clean dataset)
-- [x] Smoke test passed — server starts clean, 9 markets discovered, 9/9 gaps computed
+- [x] `data/settlement_model.pkl` exists — AUC 0.8095, Brier 0.1654 (retrained on 57,313 rows)
+- [x] Server running on Railway — `polymarket-gap-bot-production.up.railway.app`
+- [x] EOD cron running on Railway — fires at 4:20 PM ET weekdays
 
 ### During paper trading (accumulating data)
-- [ ] Monitor each session: check `localhost:8001` for live signals and open positions
-- [ ] After 4:20pm each weekday: EOD pipeline runs automatically via launchd (logs to `logs/eod_update.log`)
+- [ ] Monitor each session: check dashboard at `polymarket-gap-bot-production.up.railway.app`
+- [ ] After 4:20pm each weekday: EOD cron runs automatically on Railway (logs to Railway deploy logs)
 - [ ] Run `tools/oos_validation.py` monthly once 30+ new sessions have accumulated
 
 ---
 
-## Railway + Supabase Migration (required — Mac can't stay on during market hours)
+## Railway + Supabase Migration — Complete
 
-**Why this is blocking:** launchd crash recovery only works if the Mac is on. Railway hosts `server.py` 24/7 on a remote VM. Supabase replaces the local SQLite files that Railway's ephemeral filesystem would wipe on every redeploy.
-
-### Phase 1 — Supabase (DB migration)
+### Phase 1 — Supabase (DB migration) ✓
 - [x] Create Supabase project (id: dftkwvdhwkbtjxutgqzy, us-west-1, free tier)
 - [x] Apply schema via MCP (8 tables, PostgreSQL DDL)
-- [x] Migrate all historical data: isolated_priors (18), daily_wr (18), scraped_observations (1355), stock_daily_obs (11295), live_quotes (9) — row counts verified
-- [x] Rewrite `database/db.py`: `DATABASE_URL` env var selects psycopg2 (PG) or sqlite3 (local). `_PgConn` wrapper translates `?`→`%s`, handles RETURNING id, ON CONFLICT upserts.
-- [x] Fix `database/wr_store.py`: `INSERT OR IGNORE` → ON CONFLICT DO NOTHING, PRAGMA → information_schema for PG
-- [x] Add `psycopg2-binary` to requirements.txt; update .env.example with DATABASE_URL
-- [ ] **YOU:** Get Supabase DB password from dashboard (Settings → Database → Connection string) → add to local `.env` as `DATABASE_URL=postgresql://postgres:[password]@db.dftkwvdhwkbtjxutgqzy.supabase.co:5432/postgres`
-- [ ] **YOU:** Test locally: `DATABASE_URL=postgresql://...` python -c "from database.db import init_db, total_stats; init_db(); print(total_stats())"
+- [x] Migrate all historical data: isolated_priors (18), daily_wr (18), scraped_observations (1355), stock_daily_obs (11295), live_quotes (9)
+- [x] Rewrite `database/db.py`: dual SQLite/PostgreSQL backend with `_PgConn` wrapper
+- [x] Fix `database/wr_store.py`: PG-compatible SQL throughout
+- [x] Add `psycopg2-binary` to requirements.txt; update .env.example
 
-### Phase 2 — Railway (server deploy)
-- [ ] Commit model artifacts to git: `data/settlement_model.pkl`, `data/exit_model_calibration.csv` (currently gitignored but needed at startup)
-- [x] Change `server.py` port → `int(os.environ.get("PORT", 8001))` (avoids local conflict with Hermes port 8000)
-- [ ] Add `railway.toml` with start command: `python server.py`
-- [ ] Set Railway env vars: `DATABASE_URL`, `TWELVEDATA_API_KEY`, `CLOB_API_KEY`, `GAMMA_API` (and all others from `.env`)
-- [ ] Deploy and confirm startup log shows "Server ready" with 9 markets discovered
-- [ ] Remove `deploy/com.polymarket.server.plist` from active launchd (Railway takes over crash recovery)
+### Phase 2 — Railway server ✓
+- [x] `railway.toml` with `python server.py` start command, `on_failure` restart policy
+- [x] `data/settlement_model.pkl` + `data/exit_model_calibration.csv` committed to git
+- [x] GitHub repo: `https://github.com/jayzhuang1996/polymarket-gap-bot`
+- [x] Railway service deployed and Active — 9 markets discovered, all 9 gaps computed
+- [x] Dashboard exposed at `polymarket-gap-bot-production.up.railway.app`
 
-### Phase 3 — EOD cron on Railway
-- [ ] Add second Railway service (cron) running `python tools/eod_pipeline.py`
-- [ ] Schedule: `0 21 * * 1-5` (4:20pm ET = 21:20 UTC, Mon–Fri)
-- [ ] Verify cron has access to same `DATABASE_URL` and writes back to Supabase correctly
-- [ ] Keep `com.polymarket.eod_update.plist` as local fallback until Railway cron confirmed working
+### Phase 3 — EOD cron on Railway ✓
+- [x] Railway cron service: `python tools/eod_update.py` at `20 21 * * 1-5` (UTC)
+- [x] Fix `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING` in `eod_update.py` for PG
+- [x] Add `holidays` + `pyarrow` to requirements.txt
+- [ ] Verify first cron run fires tonight (May 26) — check Railway cron deploy logs after 4:20 PM ET
+- [ ] Confirm `scraped_observations` row count +9 in Supabase after first run
+- [ ] Unload `com.polymarket.eod_update.plist` from local launchd once Railway cron confirmed working
+
+**Note:** Steps 2–4 of `eod_pipeline.py` (model retraining) stay local. Railway filesystem is ephemeral — parquet trade history files don't persist across deploys. Run monthly from Mac after 30+ new sessions.
 
 ---
 
 ## Near-Term Improvements (next 2 weeks)
 
-- [x] **Extract `compute_position_size()` from `config.py`** — moved to `engine/sizer.py`. All three import sites updated.
-
-- [ ] **Sector correlation cap** — max 1 position per sector group prevents 4 simultaneous tech-long positions. Tech group: NVDA/TSLA/AAPL/META/MSFT/GOOGL/NFLX. Pure risk management, no edge assumption needed.
-
-- [ ] **Better NO entry signal** — current 3-of-4 heuristic for NO trades uses GFR as GO signal but data shows p1 ≈ p0 (not informative). Candidates: pre-market volume, sector breadth, VIX spike direction. Do NOT implement until LR > 1.3 confirmed in data.
+- [x] **Extract `compute_position_size()` from `config.py`** — moved to `engine/sizer.py`.
+- [ ] **Sector correlation cap** — max 1 position per sector group prevents 4 simultaneous tech-long positions. Tech group: NVDA/TSLA/AAPL/META/MSFT/GOOGL/NFLX.
+- [ ] **Better NO entry signal** — current 3-of-4 heuristic for NO trades. Do NOT implement until LR > 1.3 confirmed in data.
 
 ---
 
-## Medium-Term (next month, data-dependent)
+## Medium-Term (data-dependent)
 
-- [ ] **Ticker-specific calibration sub-tables** — SPX token dynamics differ from TSLA. Check if per-ticker cell density ≥ 30 after splitting. Fall back to pooled for sparse cells.
-
-- [ ] **CLOB exit discount calibration** — hardcoded `CLOB_EXIT_DISCOUNT = 0.05` is a guess. Track estimated vs actual exit price from paper trades. Derive empirical discount per ticker/time/spread bucket.
-
-- [ ] **90¢ reverse NO bet module** — after 1pm, if YES token ≥ 90¢ AND GFR flat/fading AND settlement_prob < 0.88 → enter NO. Only after fully exiting YES. Needs separate entry/exit tracking.
-
-- [ ] **Gap size segmentation in calibration table** — add gap bucket dimension (small: 0.5–2%, large: ≥2%). A 0.7% gap with GFR=0 at 11:30am is very different from a 3.0% gap with GFR=0.
-
-- [ ] **Intraday flat-open entry signal** — test: if gap < 0.3% at open but stock moves >0.8% from open by 10:30am, is Polymarket still anchored near 50¢? Only add if confirmed in `full_session_2min.csv`.
+- [ ] **Monthly model retraining workflow** — after 30+ sessions: run `eod_pipeline.py` locally (steps 2-4), commit updated `settlement_model.pkl` + `exit_model_calibration.csv`, push → Railway auto-deploys with fresh models.
+- [ ] **Ticker-specific calibration sub-tables** — check per-ticker cell density ≥ 30 after splitting.
+- [ ] **CLOB exit discount calibration** — hardcoded `CLOB_EXIT_DISCOUNT = 0.05` is a guess. Track estimated vs actual exit price from paper trades.
+- [ ] **90¢ reverse NO bet module** — after 1pm, if YES ≥ 90¢ AND GFR flat/fading AND settlement_prob < 0.88 → enter NO.
+- [ ] **Gap size segmentation in calibration table** — add gap bucket dimension (small: 0.5–2%, large: ≥2%).
+- [ ] **Daily WR cache refresh** — reload `wr_cache` at start of each trading day in `trading_session_loop` so updated Supabase values are used without a server restart.
 
 ---
 
-## Data Gaps (non-blocking)
+## Data Gaps
 
 | Gap | Impact | Fix |
 |-----|--------|-----|
-| ~~GFR missing Oct 2025 → Feb 2026~~ | ~~Exit model less accurate~~ | Solved — Twelve Data backfill, AUC 0.683 → 0.8095 |
+| ~~GFR missing Oct 2025 → Feb 2026~~ | ~~Exit model less accurate~~ | Solved — Twelve Data backfill |
 | OOS validation only 22 days | Can't confirm edge persistence | Re-run monthly as paper trades accumulate |
 | Backtest tools use flat 0.5% threshold | Overstated edge on high-beta tickers | Update `tools/backtest_may20.py` to use `TICKER_GAP_THRESHOLD` |
 
@@ -94,7 +103,7 @@ All must be true before spending real capital:
 - [ ] USDC balance matches intended max exposure
 - [ ] CLOB contract `approve()` called (USDC allowance set)
 - [ ] Bot wallet is dedicated address (not personal funds)
-- [ ] Private key only in `.env`, not in any log
+- [ ] Private key only in `.env` and Railway env vars, not in any log
 
 **Execution:**
 - [ ] WebSocket reconnect: first tick discarded (stale snapshot)
@@ -106,14 +115,14 @@ All must be true before spending real capital:
 
 **Dry-run validation:**
 - [ ] Run full week with $0 wallet balance
-- [ ] All NSF rejection reasons logged (each is a signal the backtest ignores)
+- [ ] All NSF rejection reasons logged
 - [ ] Backtest vs paper trade gap < 5% before sizing up
+- [ ] DST fix deployed (see P1 above)
 
 ---
 
-## Deferred (after 1+ months of paper trading)
+## Deferred
 
-- Supabase migration (replace SQLite → PostgreSQL for remote access)
-- Polygon.io historical intraday data (fill GFR gap for Oct 2025–Feb 2026)
-- Correlation hedge (reduce position when multiple tickers signal same direction)
 - Per-ticker CLOB execution analysis (fill rate, slippage, repricing frequency)
+- Polygon.io historical intraday data (for future GFR backfills)
+- Correlation hedge (reduce position when multiple tickers signal same direction)
