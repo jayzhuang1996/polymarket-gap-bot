@@ -28,6 +28,7 @@ from holidays import NYSE
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from database.db import init_db
 from database.wr_store import daily_update, update_stock_priors
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -335,6 +336,7 @@ def main():
                         help="Backfill trade data for last N days (skips gap obs, trades only)")
     args = parser.parse_args()
 
+    init_db()  # establishes DB connection; sets _pg_available=False on pooler failure
     print(f"[{dt.now(timezone.utc).isoformat()}] EOD Update")
     print()
 
