@@ -140,6 +140,16 @@ def init_db():
                     "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS adj_wr REAL",
                     "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS gfr_at_entry REAL",
                     "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS spread_at_entry REAL",
+                    """CREATE TABLE IF NOT EXISTS scan_log (
+                        id BIGSERIAL PRIMARY KEY,
+                        date DATE NOT NULL,
+                        scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        ticker TEXT NOT NULL,
+                        et_time TEXT,
+                        gap_bps REAL, yes_ask REAL, yes_bid REAL,
+                        adj_wr REAL, edge REAL, gfr REAL, gfr_velocity REAL,
+                        settlement_p_win REAL, signal TEXT NOT NULL, vix_change REAL
+                    )""",
                 ]:
                     try:
                         conn.execute(migration)
@@ -559,6 +569,37 @@ def get_live_quotes() -> list:
 
 
 # ── Notifications ─────────────────────────────────────────────────────────────
+
+
+def store_scan_log(
+    date_str: str,
+    ticker: str,
+    signal: str,
+    *,
+    et_time: Optional[str] = None,
+    gap_bps: Optional[float] = None,
+    yes_ask: Optional[float] = None,
+    yes_bid: Optional[float] = None,
+    adj_wr: Optional[float] = None,
+    edge: Optional[float] = None,
+    gfr: Optional[float] = None,
+    gfr_velocity: Optional[float] = None,
+    settlement_p_win: Optional[float] = None,
+    vix_change: Optional[float] = None,
+):
+    """Record every 2-min evaluation tick — entry, skip, flat, fade."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO scan_log
+                (date, scanned_at, ticker, et_time, gap_bps, yes_ask, yes_bid,
+                 adj_wr, edge, gfr, gfr_velocity, settlement_p_win, signal, vix_change)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (date_str, now, ticker, et_time, gap_bps, yes_ask, yes_bid,
+             adj_wr, edge, gfr, gfr_velocity, settlement_p_win, signal, vix_change),
+        )
 
 
 def store_notification(type_: str, ticker: str | None, message: str):
