@@ -1,8 +1,9 @@
 """REST API endpoints."""
 
+import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, BackgroundTasks, Query
 from fastapi.responses import FileResponse
 
 import engine.state as state
@@ -81,6 +82,31 @@ def api_pnl_history(limit: int = Query(30, ge=1, le=365)):
 @router.get("/api/session-state")
 def api_session_state():
     return get_session_state()
+
+
+@router.post("/api/trigger/eod")
+async def api_trigger_eod(background_tasks: BackgroundTasks):
+    """Trigger end-of-day data collection in-process.
+
+    Called by the Railway cron service via:
+        curl -X POST https://<app>/api/trigger/eod
+
+    Runs inside the main server process so it writes to the
+    persistent volume at /data/polymarket.db, not the cron
+    container's ephemeral disk.
+    """
+    from tools.eod_update import eod_update
+    from datetime import date
+
+    def _run():
+        try:
+            result = eod_update(date.today())
+            print(f"[eod-trigger] done: {result}")
+        except Exception as e:
+            print(f"[eod-trigger] error: {e}")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "date": date.today().isoformat()}
 
 
 @router.get("/api/health")
