@@ -8,7 +8,9 @@ Usage:  python server.py  →  http://localhost:8000
 
 import asyncio
 import os
+import sys
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import uvicorn
 from fastapi import FastAPI
@@ -23,6 +25,39 @@ from engine.session import trading_session_loop, reconcile_session_state
 from engine.order_manager import OrderManager
 from api.routes import router as api_router
 from api.ws import router as ws_router, broadcast_worker
+
+
+async def _eod_subprocess_scheduler():
+    """Spawn eod_update.py as a separate subprocess at 4:10 PM ET on weekdays.
+
+    Runs as a child process — completely isolated from the trading loop.
+    If eod_update crashes or hangs, the server is unaffected.
+    """
+    last_run: str | None = None
+    while True:
+        await asyncio.sleep(60)
+        et = datetime.now(timezone.utc) + timedelta(hours=-4)
+        if et.weekday() >= 5:
+            continue
+        if et.hour != 16 or et.minute not in (10, 11, 12):
+            continue
+        today = et.strftime("%Y-%m-%d")
+        if last_run == today:
+            continue
+        last_run = today
+        print(f"[eod-scheduler] spawning eod_update for {today}")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "tools/eod_update.py",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+            print(f"[eod-scheduler] done (exit {proc.returncode})")
+            if out:
+                print(out.decode()[:2000])
+        except Exception as e:
+            print(f"[eod-scheduler] error: {e}")
 
 
 @asynccontextmanager
@@ -63,6 +98,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(broadcast_worker(),       name="broadcast")
     asyncio.create_task(stock_price_loop(),       name="stock-prices")
     asyncio.create_task(trading_session_loop(),   name="trading-session")
+    asyncio.create_task(_eod_subprocess_scheduler(), name="eod-scheduler")
     port = int(os.environ.get("PORT", 8001))
     print(f"  Server ready → http://localhost:{port}\n")
 

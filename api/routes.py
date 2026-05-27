@@ -109,6 +109,95 @@ async def api_trigger_eod(background_tasks: BackgroundTasks):
     return {"status": "started", "date": date.today().isoformat()}
 
 
+@router.get("/api/test/preflight")
+async def api_preflight():
+    """Pre-market system check. Run this at 9:00 AM before trading starts.
+
+    Tests every component the bot depends on. Green across the board = safe to trade.
+    Any red = something will fail when the market opens at 9:35 AM.
+    """
+    import time
+    import requests as _req
+    from database.db import _pg_available, USE_PG, DB_PATH, store_scan_log, get_scan_log
+    from database.wr_store import load_base_wr
+
+    checks = {}
+
+    # 1. DB write + read round-trip
+    try:
+        store_scan_log("1970-01-01", "_preflight_test", "TEST",
+                       gap_bps=0.0, edge=0.0)
+        rows = get_scan_log("1970-01-01")
+        hit  = any(r.get("ticker") == "_preflight_test" for r in rows)
+        checks["db_write_read"] = "ok" if hit else "wrote but could not read back"
+    except Exception as e:
+        checks["db_write_read"] = f"FAIL: {e}"
+
+    # 2. Volume / persistent path
+    import os as _os
+    checks["volume_mounted"]  = "ok" if DB_PATH.startswith("/data") else f"WARN: path is {DB_PATH} — data lost on redeploy"
+    checks["db_file_exists"]  = "ok" if _os.path.exists(DB_PATH) else "WARN: file not found yet (first run?)"
+
+    # 3. DB backend
+    if USE_PG and _pg_available:
+        checks["db_backend"] = "supabase (connected)"
+    elif USE_PG and not _pg_available:
+        checks["db_backend"] = "sqlite_fallback (supabase unavailable)"
+    else:
+        checks["db_backend"] = "sqlite (local only)"
+
+    # 4. WR cache loaded
+    try:
+        wr_ok = sum(1 for t, _ in state.wr_cache.items() if state.wr_cache[t][0] is not None)
+        checks["wr_cache"] = f"ok ({wr_ok}/{len(state.wr_cache)} tickers loaded)"
+    except Exception as e:
+        checks["wr_cache"] = f"FAIL: {e}"
+
+    # 5. Markets discovered
+    n_markets = len(state.market_list)
+    checks["markets_discovered"] = f"ok ({n_markets} markets)" if n_markets >= 9 else f"WARN: only {n_markets} markets (expected 9)"
+
+    # 6. CLOB / live quotes arriving
+    n_quotes = sum(1 for q in state.current_quotes.values() if q.get("yes_ask"))
+    checks["live_quotes"] = f"ok ({n_quotes}/9 tickers have quotes)" if n_quotes >= 6 else f"WARN: only {n_quotes}/9 tickers have live quotes"
+
+    # 7. Polymarket API reachable
+    try:
+        t0 = time.time()
+        r  = _req.get("https://gamma-api.polymarket.com/markets?limit=1", timeout=5)
+        ms = int((time.time() - t0) * 1000)
+        checks["polymarket_api"] = f"ok ({ms}ms)" if r.status_code == 200 else f"FAIL: HTTP {r.status_code}"
+    except Exception as e:
+        checks["polymarket_api"] = f"FAIL: {e}"
+
+    # 8. yfinance reachable (quick SPX fetch)
+    try:
+        import yfinance as yf
+        t0   = time.time()
+        spx  = yf.Ticker("^GSPC").fast_info
+        ms   = int((time.time() - t0) * 1000)
+        last = getattr(spx, "last_price", None)
+        checks["yfinance"] = f"ok (SPX={last:.0f}, {ms}ms)" if last else "WARN: no price returned"
+    except Exception as e:
+        checks["yfinance"] = f"FAIL: {e}"
+
+    # overall
+    any_fail = any("FAIL" in str(v) for v in checks.values())
+    any_warn = any("WARN" in str(v) for v in checks.values())
+    overall  = "FAIL" if any_fail else ("WARN" if any_warn else "ALL GREEN")
+
+    from datetime import timedelta as _td
+    et = datetime.now(timezone.utc) + _td(hours=-4)
+    mins_to_open = max(0, (9*60+35) - (et.hour*60+et.minute))
+
+    return {
+        "overall":        overall,
+        "et_time":        et.strftime("%H:%M"),
+        "mins_to_open":   mins_to_open,
+        "checks":         checks,
+    }
+
+
 @router.get("/api/health")
 def api_health():
     """System health check — call this anytime to verify everything is working.
