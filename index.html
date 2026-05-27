@@ -114,10 +114,21 @@ header{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap
 .card-foot{font-family:var(--f-mono);font-size:0.58rem;color:var(--ink2);border-top:1px solid var(--paper3);padding:5px 13px;display:flex;justify-content:space-between;}
 
 /* ─── PANELS ─────────────────────────────────────────── */
-.panel{border:1.5px solid var(--cobalt);margin-bottom:16px;background:var(--paper);}
-.panel-head{background:var(--cobalt);color:white;padding:11px 18px;font-family:var(--f-mono);font-size:0.72rem;letter-spacing:0.12em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;}
-.panel-body{padding:16px 18px;}
+.panels-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px;margin-bottom:16px;}
+@media(max-width:800px){.panels-grid{grid-template-columns:1fr;}}
+.panel{border:1.5px solid var(--cobalt);background:var(--paper);}
+.panel-head{background:var(--cobalt);color:white;padding:9px 14px;font-family:var(--f-mono);font-size:0.68rem;letter-spacing:0.12em;text-transform:uppercase;display:flex;justify-content:space-between;align-items:center;}
+.panel-body{padding:12px 14px;}
 .panel-empty{font-family:var(--f-mono);font-size:0.7rem;color:var(--ink2);letter-spacing:0.06em;text-transform:uppercase;padding:6px 0;}
+/* scan feed */
+.scan-table{width:100%;border-collapse:collapse;font-family:var(--f-mono);font-size:0.64rem;}
+.scan-table th{color:var(--ink2);font-size:0.54rem;text-transform:uppercase;letter-spacing:0.1em;padding:3px 8px 4px 0;border-bottom:1px solid var(--cobalt);font-weight:400;}
+.scan-table td{padding:5px 8px 5px 0;border-bottom:1px solid var(--paper2);font-variant-numeric:tabular-nums;}
+.sig-go{color:var(--green);font-weight:600;}
+.sig-skip{color:var(--ink3);}
+.sig-fade{color:var(--red);font-weight:500;}
+.sig-flat{color:var(--amber);}
+.sig-unknown{color:var(--ink3);opacity:0.5;}
 
 /* positions table */
 .pos-table{width:100%;border-collapse:collapse;font-family:var(--f-mono);font-size:0.72rem;}
@@ -188,37 +199,52 @@ header{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap
   <div class="stat"><div class="stat-n" id="s-exit">—</div><div class="stat-l">Next Exit</div><div class="stat-sub" id="s-exit-sub"></div></div>
 </div>
 
-<!-- Open Positions -->
-<div class="panel" id="positions-panel">
-  <div class="panel-head">
-    <span>Open Positions</span>
-    <span id="pos-updated" style="opacity:0.7;">—</span>
-  </div>
-  <div class="panel-body" id="positions-body">
-    <div class="panel-empty">No open positions</div>
-  </div>
-</div>
+<div class="panels-grid">
 
-<!-- Live Trading Signals -->
-<div class="panel" id="signals-panel">
-  <div class="panel-head">
-    <span>Live Trading Signals</span>
-    <span style="opacity:0.7;">2-min session loop · entry + exit</span>
+  <!-- Open Positions -->
+  <div class="panel" id="positions-panel">
+    <div class="panel-head">
+      <span>Open Positions</span>
+      <span id="pos-updated" style="opacity:0.7;">—</span>
+    </div>
+    <div class="panel-body" id="positions-body">
+      <div class="panel-empty">No open positions</div>
+    </div>
   </div>
-  <div class="panel-body" id="signals-body">
-    <div class="panel-empty">No signals yet this session</div>
-  </div>
-</div>
 
-<!-- Scanner Decisions Today -->
-<div class="panel" id="decisions-panel">
-  <div class="panel-head">
-    <span>Scanner Decisions Today</span>
-    <span style="opacity:0.7;">batch run log</span>
+  <!-- Live Scanner — 2-min evaluation feed -->
+  <div class="panel" id="scanner-panel">
+    <div class="panel-head">
+      <span>Live Scanner</span>
+      <span id="scanner-updated" style="opacity:0.7;">updates every 2 min</span>
+    </div>
+    <div class="panel-body" id="scanner-body">
+      <div class="panel-empty">Waiting for market open (9:35 AM ET)</div>
+    </div>
   </div>
-  <div class="panel-body" id="decisions-body">
-    <div class="panel-empty">No decisions recorded yet</div>
+
+  <!-- Live Trading Signals -->
+  <div class="panel" id="signals-panel">
+    <div class="panel-head">
+      <span>Live Trading Signals</span>
+      <span style="opacity:0.7;">entry + exit events</span>
+    </div>
+    <div class="panel-body" id="signals-body">
+      <div class="panel-empty">No signals yet this session</div>
+    </div>
   </div>
+
+  <!-- Scanner Decisions Today -->
+  <div class="panel" id="decisions-panel">
+    <div class="panel-head">
+      <span>Decisions Today</span>
+      <span style="opacity:0.7;">all entries logged</span>
+    </div>
+    <div class="panel-body" id="decisions-body">
+      <div class="panel-empty">No decisions recorded yet</div>
+    </div>
+  </div>
+
 </div>
 
 <div class="grid" id="grid"></div>
@@ -761,11 +787,82 @@ function tickClock() {
   document.getElementById('header-time').textContent = etNow()+' ET';
   updateExitCountdown();
 }
+// ── Live Scanner feed ─────────────────────────────────────────────────────────
+const SIG_ORDER = ['SPX','NVDA','TSLA','AAPL','AMZN','GOOGL','META','MSFT','NFLX'];
+
+function sigClass(signal) {
+  if (!signal) return 'sig-unknown';
+  const s = signal.toUpperCase();
+  if (s.includes('GO') || s.includes('ENTRY') || s.includes('BUY')) return 'sig-go';
+  if (s.includes('FADE') || s.includes('ABORT')) return 'sig-fade';
+  if (s.includes('FLAT')) return 'sig-flat';
+  return 'sig-skip';
+}
+
+function fmtScanTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  // convert UTC → ET (UTC-4 EDT)
+  const et = new Date(d.getTime() - 4*60*60*1000);
+  return et.toISOString().slice(11,16) + ' ET';
+}
+
+async function loadScanner() {
+  try {
+    const rows = await fetch('/api/scan-log/latest').then(r => r.json());
+    const body = document.getElementById('scanner-body');
+    const upd  = document.getElementById('scanner-updated');
+
+    if (!rows || rows.length === 0) {
+      body.innerHTML = '<div class="panel-empty">Waiting for market open (9:35 AM ET)</div>';
+      return;
+    }
+
+    // index by ticker
+    const byTicker = {};
+    rows.forEach(r => byTicker[r.ticker] = r);
+
+    const lastTime = rows.reduce((m,r) => r.scanned_at > m ? r.scanned_at : m, '');
+    upd.textContent = 'last: ' + fmtScanTime(lastTime);
+
+    const html = `
+      <table class="scan-table">
+        <thead><tr>
+          <th>Ticker</th><th>Signal</th><th>Gap</th>
+          <th>Edge</th><th>adj WR</th><th>Time</th>
+        </tr></thead>
+        <tbody>
+          ${SIG_ORDER.map(t => {
+            const r = byTicker[t];
+            if (!r) return `<tr><td>${t}</td><td class="sig-unknown" colspan="5">no data</td></tr>`;
+            const gap  = r.gap_bps != null ? (r.gap_bps > 0 ? '+' : '') + Math.round(r.gap_bps) + ' bps' : '—';
+            const edge = r.edge  != null ? (r.edge  > 0 ? '+' : '') + (r.edge*100).toFixed(1)  + '%' : '—';
+            const wr   = r.adj_wr != null ? (r.adj_wr*100).toFixed(0) + '%' : '—';
+            const sc   = sigClass(r.signal);
+            return `<tr>
+              <td style="font-weight:600">${t}</td>
+              <td class="${sc}">${r.signal || '—'}</td>
+              <td>${gap}</td>
+              <td>${edge}</td>
+              <td>${wr}</td>
+              <td style="color:var(--ink3)">${fmtScanTime(r.scanned_at)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
+    body.innerHTML = html;
+  } catch(e) {
+    document.getElementById('scanner-body').innerHTML =
+      '<div class="panel-empty">Scanner unavailable</div>';
+  }
+}
+
 tickClock(); setInterval(tickClock, 1000);
 setInterval(loadStats,        30000); loadStats();
 setInterval(loadPositions,    15000); loadPositions();
 setInterval(loadDecisions,    60000); loadDecisions();
 setInterval(loadSessionState, 30000); loadSessionState();
+setInterval(loadScanner,     120000); loadScanner();
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connect() {

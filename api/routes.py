@@ -168,6 +168,20 @@ def api_health():
     }
 
 
+@router.get("/api/scan-log/latest")
+def api_scan_log_latest():
+    """Most recent scan_log row per ticker for today.
+
+    Used by the Live Scanner panel — shows each ticker's last 2-min evaluation.
+    """
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    rows  = get_scan_log(today)
+    latest: dict[str, dict] = {}
+    for r in rows:
+        latest[r["ticker"]] = r  # later rows overwrite earlier — gets most recent
+    return list(latest.values())
+
+
 @router.get("/api/export/daily")
 def api_export_daily(date: str = Query(None, description="YYYY-MM-DD, defaults to today")):
     """Full day export for post-market analysis.
