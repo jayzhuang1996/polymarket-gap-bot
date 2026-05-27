@@ -316,26 +316,6 @@ async def trading_session_loop():
                 elif is_reentry:
                     state._session_entered.add(display)
 
-            # ── Scan log — record every tick regardless of outcome ─────────
-            try:
-                store_scan_log(
-                    datetime.now().strftime("%Y-%m-%d"),
-                    display,
-                    q.get("signal", "UNKNOWN"),
-                    et_time=f"{h:02d}:{m:02d}",
-                    gap_bps=q.get("gap_bps"),
-                    yes_ask=q.get("yes_ask"),
-                    yes_bid=q.get("yes_bid"),
-                    adj_wr=q.get("adj_wr"),
-                    edge=q.get("live_edge"),
-                    gfr=q.get("gfr"),
-                    gfr_velocity=q.get("gfr_velocity"),
-                    settlement_p_win=q.get("settlement_p_win"),
-                    vix_change=state._vix_change,
-                )
-            except Exception:
-                pass  # never let logging crash the trading loop
-
             # ── Exit ──────────────────────────────────────────────────────
             elif in_position and not fully_exited:
                 position = open_positions[display]
@@ -425,6 +405,26 @@ async def trading_session_loop():
                                         "size_contracts": sell_contracts,
                                         "placed_at":      datetime.now(),
                                     }
+
+            # ── Scan log — every tick, every ticker, regardless of outcome ──
+            try:
+                store_scan_log(
+                    datetime.now().strftime("%Y-%m-%d"),
+                    display,
+                    q.get("signal", "UNKNOWN"),
+                    et_time=f"{h:02d}:{m:02d}",
+                    gap_bps=q.get("gap_bps"),
+                    yes_ask=q.get("yes_ask"),
+                    yes_bid=q.get("yes_bid"),
+                    adj_wr=q.get("adj_wr"),
+                    edge=q.get("live_edge"),
+                    gfr=q.get("gfr"),
+                    gfr_velocity=q.get("gfr_velocity"),
+                    settlement_p_win=q.get("settlement_p_win"),
+                    vix_change=state._vix_change,
+                )
+            except Exception:
+                pass
 
         # ── Broadcast ─────────────────────────────────────────────────────
         if signals_this_cycle:
