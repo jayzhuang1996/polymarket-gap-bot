@@ -9,7 +9,6 @@ Usage:  python server.py  →  http://localhost:8000
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 
 import uvicorn
 from fastapi import FastAPI
@@ -24,41 +23,6 @@ from engine.session import trading_session_loop, reconcile_session_state
 from engine.order_manager import OrderManager
 from api.routes import router as api_router
 from api.ws import router as ws_router, broadcast_worker
-
-
-async def eod_scheduler():
-    """Fire eod_update() at 4:10 PM ET every weekday inside the server process.
-
-    Runs in-process so it writes to /data/polymarket.db on the persistent volume.
-    Checks every 60 seconds; fires once per calendar day (guarded by last_run date).
-    ET = UTC-4 (EDT). Will be 1h late in winter (EST) — fix with zoneinfo when needed.
-    """
-    from tools.eod_update import eod_update
-    last_run: str | None = None
-
-    while True:
-        await asyncio.sleep(60)
-        et_now = datetime.now(timezone.utc) + timedelta(hours=-4)
-
-        # weekdays only (Mon=0 … Fri=4)
-        if et_now.weekday() >= 5:
-            continue
-
-        # fire at 16:10–16:12 ET (3-minute window so a slow minute-tick can't miss it)
-        if et_now.hour != 16 or et_now.minute not in (10, 11, 12):
-            continue
-
-        today_str = et_now.strftime("%Y-%m-%d")
-        if last_run == today_str:
-            continue  # already ran today
-
-        last_run = today_str
-        print(f"[eod-scheduler] starting EOD update for {today_str}")
-        try:
-            await asyncio.to_thread(eod_update, et_now.date())
-            print(f"[eod-scheduler] done")
-        except Exception as e:
-            print(f"[eod-scheduler] error: {e}")
 
 
 @asynccontextmanager
@@ -99,7 +63,6 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(broadcast_worker(),       name="broadcast")
     asyncio.create_task(stock_price_loop(),       name="stock-prices")
     asyncio.create_task(trading_session_loop(),   name="trading-session")
-    asyncio.create_task(eod_scheduler(),          name="eod-scheduler")
     port = int(os.environ.get("PORT", 8001))
     print(f"  Server ready → http://localhost:{port}\n")
 
