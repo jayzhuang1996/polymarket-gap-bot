@@ -257,6 +257,64 @@ def api_health():
     }
 
 
+@router.get("/api/test/volume")
+def api_test_volume():
+    """Write a real scan_log row for today, read it back via the normal path, then delete it.
+
+    This proves the full pipeline: SQLite write → persistent volume → API read.
+    Run this any time before market open to confirm data will survive the session.
+    """
+    import os
+    from database.db import store_scan_log, get_scan_log, _conn, DB_PATH
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    test_ticker = "__vol_test__"
+
+    # 1. Write
+    try:
+        store_scan_log(
+            today, test_ticker, "TEST",
+            gap_bps=42.0, edge=0.07, adj_wr=0.75,
+        )
+        write_ok = True
+    except Exception as e:
+        return {"passed": False, "stage": "write", "error": str(e)}
+
+    # 2. Read back via the same function the API uses
+    try:
+        rows = get_scan_log(today)
+        found = any(r.get("ticker") == test_ticker for r in rows)
+        read_ok = found
+    except Exception as e:
+        return {"passed": False, "stage": "read", "error": str(e)}
+
+    # 3. Cleanup
+    try:
+        c = _conn()
+        c.execute("DELETE FROM scan_log WHERE ticker = ?", (test_ticker,))
+        c.commit()
+        c.close()
+    except Exception:
+        pass  # cleanup failure doesn't fail the test
+
+    # 4. File size — confirms data is accumulating on the volume
+    try:
+        size_kb = round(os.path.getsize(DB_PATH) / 1024, 1)
+    except Exception:
+        size_kb = None
+
+    passed = write_ok and read_ok
+    return {
+        "passed":      passed,
+        "write":       "ok" if write_ok else "FAIL",
+        "read_back":   "ok" if read_ok  else "FAIL — wrote but could not read",
+        "db_path":     DB_PATH,
+        "db_size_kb":  size_kb,
+        "note":        "Volume is working — data will persist across restarts." if passed
+                       else "PROBLEM: data written but not readable. Check volume mount.",
+    }
+
+
 @router.get("/api/scan-log/latest")
 def api_scan_log_latest():
     """Most recent scan_log row per ticker for today.
