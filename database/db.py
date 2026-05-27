@@ -284,8 +284,7 @@ def store_decision(
     spread_at_entry: Optional[float] = None,
 ) -> int:
     """Log a decision row. Returns the row id."""
-    conn = _conn()
-    try:
+    with _conn() as conn:
         cur = conn.execute(
             """
             INSERT INTO decisions
@@ -294,7 +293,6 @@ def store_decision(
                  expected_edge, book_depth, adj_wr, gfr_at_entry,
                  spread_at_entry, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
             """,
             (
                 date_str, ticker, slug, gap_bps, yes_bid, yes_ask, spread_bps,
@@ -303,10 +301,7 @@ def store_decision(
                 spread_at_entry, datetime.now(timezone.utc).isoformat(),
             ),
         )
-        conn.commit()
         return cur.lastrowid
-    finally:
-        conn.close()
 
 
 def get_decisions_by_date(date_str: str) -> list:
@@ -350,13 +345,11 @@ def store_outcome(
     exit_type='time_exit' — sold at CLOB market price.
     exit_type='stop_loss' — stop-loss triggered intraday.
     """
-    conn = _conn()
-    try:
+    with _conn() as conn:
         cur = conn.execute(
             """
             INSERT INTO outcomes (decision_id, date, ticker, resolved_yes, pnl_usd, closed_at, exit_price, exit_type)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
             """,
             (
                 decision_id,
@@ -369,10 +362,7 @@ def store_outcome(
                 exit_type,
             ),
         )
-        conn.commit()
         return cur.lastrowid
-    finally:
-        conn.close()
 
 
 def get_outcomes_for_date(date_str: str) -> list:
