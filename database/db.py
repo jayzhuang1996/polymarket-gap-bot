@@ -621,6 +621,20 @@ def store_scan_log(
         )
 
 
+def get_scan_log(date_str: str) -> list[dict]:
+    """All scan_log rows for a given date, ordered by time."""
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT * FROM scan_log
+            WHERE date = ?
+            ORDER BY scanned_at
+            """,
+            (date_str,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 def store_notification(type_: str, ticker: str | None, message: str):
     """Log a notification event (entry, exit, scan, info)."""
     now = datetime.now(timezone.utc).isoformat()

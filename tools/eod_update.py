@@ -238,6 +238,102 @@ def store_observation(d: date, display_name: str, gap_pct: float, close_up: bool
         c.close()
 
 
+# ── Supabase Sync ──────────────────────────────────────────────────────────────
+
+def _sync_sqlite_to_supabase(d: date) -> None:
+    """Push today's SQLite rows to Supabase as a best-effort EOD mirror.
+
+    Safe to call even when Supabase is unavailable — any failure is logged
+    and silently swallowed so the rest of eod_update continues.
+
+    Tables synced: scan_log, decisions, outcomes.
+    Uses INSERT ... ON CONFLICT DO NOTHING so re-runs are idempotent.
+    Only runs when DATABASE_URL is set AND SQLite is the current backend
+    (i.e. _pg_available is False, meaning we wrote to SQLite during the day).
+    """
+    import os
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return  # no Supabase configured
+
+    from database.db import _pg_available, get_scan_log, get_decisions_by_date, get_outcomes_for_date
+    if _pg_available:
+        return  # already writing to Supabase directly — nothing to sync
+
+    date_str = d.isoformat()
+    scan      = get_scan_log(date_str)
+    decisions = get_decisions_by_date(date_str)
+    outcomes  = get_outcomes_for_date(date_str)
+
+    if not scan and not decisions and not outcomes:
+        return  # nothing to sync
+
+    try:
+        import psycopg2
+        if "sslmode" not in db_url:
+            db_url = db_url + ("&" if "?" in db_url else "?") + "sslmode=require"
+        pg = psycopg2.connect(db_url)
+        cur = pg.cursor()
+
+        # scan_log — idempotent upsert on (date, ticker, scanned_at)
+        for row in scan:
+            cur.execute("""
+                INSERT INTO scan_log
+                    (date, scanned_at, ticker, et_time, gap_bps, yes_ask, yes_bid,
+                     adj_wr, edge, gfr, gfr_velocity, settlement_p_win, signal, vix_change)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+            """, (
+                row["date"], row["scanned_at"], row["ticker"], row.get("et_time"),
+                row.get("gap_bps"), row.get("yes_ask"), row.get("yes_bid"),
+                row.get("adj_wr"), row.get("edge"), row.get("gfr"),
+                row.get("gfr_velocity"), row.get("settlement_p_win"),
+                row.get("signal"), row.get("vix_change"),
+            ))
+
+        # decisions — idempotent on (date, ticker, created_at)
+        for row in decisions:
+            cur.execute("""
+                INSERT INTO decisions
+                    (date, ticker, slug, gap_bps, yes_bid, yes_ask, spread_bps,
+                     entry_side, entry_price, position_size, decision,
+                     expected_edge, book_depth, adj_wr, gfr_at_entry,
+                     spread_at_entry, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+            """, (
+                row["date"], row["ticker"], row.get("slug"),
+                row.get("gap_bps"), row.get("yes_bid"), row.get("yes_ask"),
+                row.get("spread_bps"), row.get("entry_side"), row.get("entry_price"),
+                row.get("position_size"), row["decision"], row.get("expected_edge"),
+                row.get("book_depth"), row.get("adj_wr"), row.get("gfr_at_entry"),
+                row.get("spread_at_entry"), row["created_at"],
+            ))
+
+        # outcomes
+        for row in outcomes:
+            cur.execute("""
+                INSERT INTO outcomes
+                    (decision_id, date, ticker, resolved_yes, pnl_usd,
+                     closed_at, exit_price, exit_type)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+            """, (
+                row["decision_id"], row["date"], row["ticker"],
+                row.get("resolved_yes"), row.get("pnl_usd"),
+                row.get("closed_at"), row.get("exit_price"),
+                row.get("exit_type", "resolve"),
+            ))
+
+        pg.commit()
+        cur.close()
+        pg.close()
+        print(f"  Supabase sync: {len(scan)} scan rows, "
+              f"{len(decisions)} decisions, {len(outcomes)} outcomes")
+    except Exception as e:
+        print(f"  Supabase sync skipped ({e})")
+
+
 # ── Core Logic ─────────────────────────────────────────────────────────────────
 
 def eod_update(target_date: date | None = None, skip_trades: bool = False) -> dict:
@@ -311,6 +407,9 @@ def eod_update(target_date: date | None = None, skip_trades: bool = False) -> di
               f"{result['trades_scraped']} trades scraped, WR updated ({updated} entries)")
     else:
         print(f"  {d}: no new observations")
+
+    # ── 5b. Sync today's SQLite rows → Supabase (best-effort mirror) ──────────
+    _sync_sqlite_to_supabase(d)
 
     # ── 6. Monthly: refresh 5-year stock priors (first trading day of each month) ──
     if d.day <= 3:
