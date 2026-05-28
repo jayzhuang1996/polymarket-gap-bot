@@ -1,5 +1,6 @@
 [build]
 builder = "nixpacks"
+buildCommand = "echo 'build ok'"
 
 [deploy]
 startCommand = "python server.py"
