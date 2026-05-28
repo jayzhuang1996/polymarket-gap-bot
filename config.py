@@ -163,22 +163,24 @@ MARKET_CLOSE_HOUR_ET = 16      # 4:00 PM ET market close
 # Format: "HH:MM" — ticker is only actionable if current time is within its window.
 # Derived from historical edge decay analysis (lesson.md section 14).
 ENTRY_WINDOWS = {
-    # All tickers now extended to 12:00pm — re-entry loop covers full morning.
-    # Per-ticker windows reflect when INITIAL edge is strongest; re-entries
-    # use tighter thresholds (spread ≤10%, edge ≥8%) regardless of ticker.
-    "SPX":   ("09:35", "12:00"),
-    "NVDA":  ("09:35", "12:00"),
-    "TSLA":  ("09:55", "12:00"),
-    "AMZN":  ("09:35", "12:00"),   # edge historically persists all day
-    "AAPL":  ("09:35", "12:00"),
-    "GOOGL": ("09:35", "12:00"),
-    "META":  ("09:35", "12:00"),
-    "MSFT":  ("09:35", "12:00"),
-    "NFLX":  ("09:35", "12:00"),
+    # Entry window extended to 14:00 with tiered edge floors:
+    #   09:35–10:30 → 5% floor (standard)
+    #   10:30–12:00 → 8% floor (late-entry)
+    #   12:00–13:30 → 15% floor (tier 1)
+    #   13:30–14:00 → 20% floor (tier 2)
+    "SPX":   ("09:35", "14:00"),
+    "NVDA":  ("09:35", "14:00"),
+    "TSLA":  ("09:55", "14:00"),
+    "AMZN":  ("09:35", "14:00"),
+    "AAPL":  ("09:35", "14:00"),
+    "GOOGL": ("09:35", "14:00"),
+    "META":  ("09:35", "14:00"),
+    "MSFT":  ("09:35", "14:00"),
+    "NFLX":  ("09:35", "14:00"),
 }
 
 # After this time, no new entries regardless of signal (freeze window)
-ENTRY_FREEZE_TIME = "12:00"
+ENTRY_FREEZE_TIME = "14:00"
 
 # Tighter thresholds for late entries (after 10:30am — less ladder time)
 LATE_ENTRY_MAX_SPREAD_PCT = 10.0   # vs 15% standard
@@ -337,10 +339,39 @@ MONTH_NAMES: list[str] = [
 SLUG_OVERRIDES: dict[str, str] = {"^GSPC": "spx"}
 
 # ============================================================================
+# INTRADAY REVERSAL TRADES
+# ============================================================================
+
+# Per-ticker NO win rate when a gap-UP day fully reverses (GFR first crosses -1.0).
+# Source: tools/reversal_analysis.py — 338 reversal events, Oct 2025–May 2026.
+# Used in _check_reversal_entry() instead of the stale cache no_wr (which is
+# 1 − gap_up_yes_wr ≈ 0.17 and meaningless for this scenario).
+REVERSAL_NO_WR: dict[str, float] = {
+    "NVDA":  0.848,
+    "AAPL":  0.711,
+    "GOOGL": 0.692,
+    "AMZN":  0.686,
+    "TSLA":  0.667,
+    "SPX":   0.658,
+    "NFLX":  0.609,
+    "META":  0.606,
+    "MSFT":  0.595,
+}
+REVERSAL_NO_WR_DEFAULT = 0.67   # overall average; fallback for unknown tickers
+
+# Edge floor for reversal entries — higher than standard because this is a
+# counter-direction bet with ~7 months of calibration data (vs 5-year gap priors).
+REVERSAL_EDGE_MIN = 0.12        # 12% floor; standard early-session floor is 5%
+
+# ============================================================================
 # BAYESIAN WR ADJUSTMENT
 # ============================================================================
 
-BAYES_LAMBDA = 0.15  # WR adjustment per unit gap_fill_ratio (mirrors engine/scanner.py)
+BAYES_LAMBDA = 0.15        # WR adjustment per GFR unit when stock is above prev_close
+BAYES_STEEP_LAMBDA = 0.35  # WR adjustment per GFR unit once stock crosses prev_close (GFR < -1.0)
+                           # Two-slope formula: shallow above the breakpoint, steep below.
+                           # Calibrated so base_wr=0.75 at GFR=-2.12 yields adj_wr≈21%,
+                           # matching observed market pricing at extreme reversals.
 
 # ============================================================================
 # LOGGING

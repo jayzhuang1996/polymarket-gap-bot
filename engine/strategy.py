@@ -21,11 +21,16 @@ from config import (
     GFR_EXIT_FRAC_YES_SHALLOW, GFR_EXIT_FRAC_YES_DEEP,
     GFR_EXIT_FRAC_NO_SHALLOW, GFR_EXIT_FRAC_NO_DEEP,
     GFR_NO_ENTRY_MIN,
+    REVERSAL_NO_WR, REVERSAL_NO_WR_DEFAULT, REVERSAL_EDGE_MIN,
 )
 
 # ── Session constants ──────────────────────────────────────────────────────────
 ENTRY_CONFIRMATIONS_NEEDED = 3
+FAST_ENTRY_EDGE_MIN        = 0.20   # bypass 3-of-4: enter after 2 consecutive GOs if edge ≥ 20%
 LATE_ENTRY_HOUR_CUTOFF     = (10, 30)
+TIER1_ENTRY_HOUR_CUTOFF    = (12, 0)   # 12:00–13:30 → edge floor 15%
+TIER2_ENTRY_HOUR_CUTOFF    = (13, 30)  # 13:30–14:00 → edge floor 20%
+ENTRY_FREEZE_HOUR          = (14, 0)   # 14:00 → hard freeze
 HARD_EXIT_ET               = (15, 0)
 ET_OFFSET_H                = -4        # EDT (Mar–Nov)
 GFR_COOLDOWN_MINUTES       = 30
@@ -46,7 +51,7 @@ def _in_market_hours() -> bool:
 
 
 def _entry_frozen(h: int, m: int) -> bool:
-    return (h, m) >= (12, 0)
+    return (h, m) >= ENTRY_FREEZE_HOUR
 
 
 def _is_late_entry(h: int, m: int) -> bool:
@@ -60,7 +65,11 @@ def _is_thursday() -> bool:
 def _entry_edge_min(h: int, m: int) -> float:
     if _is_thursday():
         return 0.10
-    if _is_late_entry(h, m):
+    if (h, m) >= TIER2_ENTRY_HOUR_CUTOFF:  # 13:30–14:00
+        return 0.20
+    if (h, m) >= TIER1_ENTRY_HOUR_CUTOFF:  # 12:00–13:30
+        return 0.15
+    if _is_late_entry(h, m):               # 10:30–12:00
         return 0.08
     return 0.05
 
@@ -72,16 +81,27 @@ def _entry_spread_max(h: int, m: int) -> float:
 # ── VIX helpers ────────────────────────────────────────────────────────────────
 
 def _fetch_vix_change() -> tuple[float | None, bool]:
-    """Fetch VIX at session start. Returns (vix_change, vix_high)."""
+    """Fetch VIX change (current vs prev close). Returns (vix_change, vix_high).
+
+    Uses fast_info.last_price for the current VIX level — daily Open bars return 0
+    early in the session before the VIX market opens, which caused 0.0 all day.
+    Falls back to bars["Close"].iloc[-1] if fast_info is unavailable.
+    """
     try:
-        bars = yf.Ticker("^VIX").history(period="5d", interval="1d")
+        ticker = yf.Ticker("^VIX")
+        bars = ticker.history(period="5d", interval="1d")
         if len(bars) < 2:
             return None, False
-        vix_prev_close  = float(bars["Close"].iloc[-2])
-        vix_open_today  = float(bars["Open"].iloc[-1])
-        vix_close_today = float(bars["Close"].iloc[-1])
-        change = round(vix_open_today - vix_prev_close, 2)
-        high   = vix_close_today > VIX_HIGH_THRESHOLD
+        vix_prev_close = float(bars["Close"].iloc[-2])
+        if vix_prev_close <= 0:
+            return None, False
+        cur = getattr(ticker.fast_info, "last_price", None)
+        if not cur or cur <= 0:
+            cur = float(bars["Close"].iloc[-1])
+        if not cur or cur <= 0:
+            return None, False
+        change = round(cur - vix_prev_close, 2)
+        high   = cur > VIX_HIGH_THRESHOLD
         return change, high
     except Exception:
         return None, False
@@ -150,6 +170,51 @@ def _compute_signal(
     return "WATCH"
 
 
+# ── Reversal entry ─────────────────────────────────────────────────────────────
+
+def _check_reversal_entry(ticker: str, q: dict, h: int, m: int) -> dict | None:
+    """NO entry when a gap-UP day fully reverses (GFR < -1.0).
+
+    Called from _check_entry when gap_bps > 50 and gfr < -1.0.
+    Uses per-ticker reversal win rates from the analysis (tools/reversal_analysis.py)
+    rather than the cached no_wr (which is 1 − gap_up_yes_wr ≈ 0.17, meaningless here).
+    """
+    if _entry_frozen(h, m):
+        return None
+    if ticker in state._session_aborted:
+        return None
+
+    no_ask = q.get("no_ask")
+    if not no_ask or no_ask < 0.40 or no_ask > 0.70:
+        return None
+
+    spread = q.get("no_spread")
+    if spread is None or spread > _entry_spread_max(h, m):
+        return None
+
+    rev_wr    = REVERSAL_NO_WR.get(ticker, REVERSAL_NO_WR_DEFAULT)
+    payout    = 1.0 - TRADING_FEE_PCT
+    live_edge = round(rev_wr * payout - no_ask, 4)
+    edge_min  = max(REVERSAL_EDGE_MIN, _entry_edge_min(h, m))
+    if live_edge < edge_min:
+        return None
+
+    return {
+        "ticker":      ticker,
+        "side":        "NO",
+        "entry_price": round(no_ask, 4),
+        "live_edge":   live_edge,
+        "adj_wr":      round(rev_wr, 4),
+        "gap_bps":     q.get("gap_bps"),
+        "go_signals":  0,
+        "tag":         "REVERSAL",
+        "late":        _is_late_entry(h, m),
+        "thursday":    _is_thursday(),
+        "vix_change":  state._vix_change,
+        "vix_high":    state._vix_high,
+    }
+
+
 # ── Entry decision ─────────────────────────────────────────────────────────────
 
 def _check_entry(
@@ -165,6 +230,13 @@ def _check_entry(
         return None
 
     gap_up  = gap_bps > 0
+    gfr     = q.get("gfr")
+
+    # Reversal path: gap-UP day, stock has crossed prev_close.
+    # Bypasses signal-history checks — GFR crossing is its own trigger.
+    if gap_up and gfr is not None and gfr < -1.0:
+        return _check_reversal_entry(ticker, q, h, m)
+
     history = state._signal_history.get(ticker, [])
 
     sprt_params = SPRT_YES_PARAMS.get(ticker) if gap_up else None
@@ -179,14 +251,16 @@ def _check_entry(
         if lr < SPRT_ENTER_LR:
             return None
     else:
-        go_count = sum(1 for s in history[-4:] if s == "GO")
-        if go_count < ENTRY_CONFIRMATIONS_NEEDED:
+        go_count       = sum(1 for s in history[-4:] if s == "GO")
+        consecutive_go = len(history) >= 2 and history[-1] == "GO" and history[-2] == "GO"
+        live_edge_now  = q.get("live_edge") or q.get("est_edge") or 0
+        fast_entry     = consecutive_go and live_edge_now >= FAST_ENTRY_EDGE_MIN
+        if not fast_entry and go_count < ENTRY_CONFIRMATIONS_NEEDED:
             return None
 
-    if not gap_up:
-        gfr = q.get("gfr")
-        if gfr is not None and gfr < GFR_NO_ENTRY_MIN:
-            return None
+    # For NO trades: skip if stock has bounced above open (gap reversing).
+    if not gap_up and gfr is not None and gfr < GFR_NO_ENTRY_MIN:
+        return None
 
     edge_min   = max(_entry_edge_min(h, m),   0.08 if reentry else 0.0)
     spread_max = min(_entry_spread_max(h, m), 10.0 if reentry else 999.0)
@@ -210,9 +284,15 @@ def _check_entry(
     if not entry_price or entry_price > 0.70 or entry_price < 0.40:
         return None
 
-    adj_wr   = q.get("adj_wr")
-    go_count = sum(1 for s in history[-4:] if s == "GO")
-    tag = "SPRT" if sprt_params else ("EARLY" if go_count == 4 else "CONFIRMED")
+    adj_wr = q.get("adj_wr")
+    if sprt_params:
+        tag = "SPRT"
+    elif fast_entry:
+        tag = "FAST"           # 2 consecutive GOs + edge ≥ 20%
+    elif go_count >= 4:
+        tag = "CONFIRMED"      # 4 of last 4 GO
+    else:
+        tag = "EARLY"          # exactly 3 of last 4 GO (minimum)
     return {
         "ticker":      ticker,
         "side":        side,

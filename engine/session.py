@@ -100,9 +100,13 @@ def get_session_state() -> dict:
 
 # ── Session loop ───────────────────────────────────────────────────────────────
 
+VIX_REFRESH_INTERVAL_MIN = 30   # re-fetch VIX every 30 minutes during market hours
+
+
 async def trading_session_loop():
     """2-minute brain — runs from 9:30am to 3pm ET every trading day."""
-    last_day = None
+    last_day      = None
+    last_vix_tick = 0   # loop-tick counter; reset each day
 
     while True:
         await asyncio.sleep(120)
@@ -128,10 +132,24 @@ async def trading_session_loop():
             state._decision_ids.clear()
             state._realized_pnl.clear()
             state._vix_change, state._vix_high = _fetch_vix_change()
-            last_day  = today
+            last_day      = today
+            last_vix_tick = 0
             vix_label = f"{state._vix_change:+.2f}" if state._vix_change is not None else "unavailable"
             print(f"  [session] New trading day — state reset ({today}) | "
                   f"VIX change={vix_label}, high_regime={state._vix_high}")
+
+        # VIX refresh every 30 minutes (15 × 2-min ticks)
+        last_vix_tick += 1
+        ticks_per_refresh = VIX_REFRESH_INTERVAL_MIN // 2
+        if last_vix_tick % ticks_per_refresh == 0:
+            new_vc, new_vh = _fetch_vix_change()
+            if new_vc is not None:
+                old_vc = state._vix_change
+                state._vix_change = new_vc
+                state._vix_high   = new_vh
+                if old_vc != new_vc:
+                    print(f"  [session] VIX refreshed {h:02d}:{m:02d} "
+                          f"{old_vc:+.2f}→{new_vc:+.2f}  high={new_vh}")
 
         # ── Resolve pending orders ─────────────────────────────────────────
         if state.order_manager and state._pending_orders:

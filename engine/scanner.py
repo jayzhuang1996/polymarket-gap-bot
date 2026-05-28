@@ -15,7 +15,7 @@ from typing import Optional
 from config import (
     MAX_YES_PRICE, MIN_YES_PRICE, MIN_BOOK_DEPTH, MAX_SPREAD_PCT, TRADING_FEE_PCT,
     GAP_EDGE_MIN, NEUTRAL_EDGE_MIN, FADE_EDGE_MIN, MIN_SCANS_FOR_DECISION,
-    TICKER_BETA, TICKER_GAP_THRESHOLD, BASE_GAP_THRESHOLD, BAYES_LAMBDA,
+    TICKER_BETA, TICKER_GAP_THRESHOLD, BASE_GAP_THRESHOLD, BAYES_LAMBDA, BAYES_STEEP_LAMBDA,
 )
 
 # ── Engine Constants (algorithm tuning, not strategy parameters) ──────────────
@@ -268,21 +268,30 @@ class MultiScanDecider:
         return (ask - bid) / mid * 100.0
 
     def _adjusted_wrs(self) -> tuple[float, float]:
-        """Bayesian-updated (yes_wr, no_wr) using the average gap_fill of recent scans."""
+        """Bayesian-updated (yes_wr, no_wr) using the average gap_fill of recent scans.
+
+        Uses the same two-slope formula as data_feed._bayesian_adj_wr:
+        - Shallow slope (BAYES_LAMBDA) while stock stays above prev_close.
+        - Steep slope (BAYES_STEEP_LAMBDA) once signed_gfr < -1.0 (stock crossed prev_close).
+        """
         recent = self.scans[-3:]
         avg_gfr = sum(s.gap_fill_ratio for s in recent) / len(recent)
 
-        # Adjust the gap-direction WR.
-        # gap_up=True:  positive gfr = gap holding = good for YES → sign +1
-        # gap_up=False: positive gfr = stock recovering toward prev_close = bad for NO → sign -1
+        # direction_sign: +1 for gap-up (positive gfr = thesis holding),
+        #                 -1 for gap-down (positive gfr = stock recovering = bad for NO).
         direction_sign = 1 if self.gap_up else -1
+        signed_gfr = avg_gfr * direction_sign
+
+        if signed_gfr >= -1.0:
+            adj = BAYES_LAMBDA * signed_gfr
+        else:
+            adj = BAYES_LAMBDA * (-1.0) + BAYES_STEEP_LAMBDA * (signed_gfr + 1.0)
+
         if self.gap_up:
-            adj_yes = self.base_wr_yes + BAYES_LAMBDA * avg_gfr * direction_sign
-            adj_yes = max(0.05, min(0.95, adj_yes))
+            adj_yes = max(0.05, min(0.95, self.base_wr_yes + adj))
             return adj_yes, 1.0 - adj_yes
         else:
-            adj_no = self.base_wr_no + BAYES_LAMBDA * avg_gfr * direction_sign
-            adj_no = max(0.05, min(0.95, adj_no))
+            adj_no = max(0.05, min(0.95, self.base_wr_no + adj))
             return 1.0 - adj_no, adj_no
 
     def _conviction(self) -> str:

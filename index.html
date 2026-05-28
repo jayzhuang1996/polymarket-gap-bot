@@ -254,12 +254,19 @@ header{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap
 const TICKERS = ['SPX','NVDA','TSLA','AAPL','AMZN','GOOGL','META','MSFT','NFLX'];
 const NAMES   = {SPX:'S&P 500',NVDA:'NVIDIA',TSLA:'Tesla',AAPL:'Apple',AMZN:'Amazon',GOOGL:'Alphabet',META:'Meta',MSFT:'Microsoft',NFLX:'Netflix'};
 const ENTRY_WINDOWS = {
-  SPX:  ['09:35','12:00'], NVDA: ['09:35','12:00'], TSLA: ['09:55','12:00'],
-  AMZN: ['09:35','12:00'], AAPL: ['09:35','12:00'], GOOGL:['09:35','12:00'],
-  META: ['09:35','12:00'], MSFT: ['09:35','12:00'], NFLX: ['09:35','12:00'],
+  SPX:  ['09:35','14:00'], NVDA: ['09:35','14:00'], TSLA: ['09:55','14:00'],
+  AMZN: ['09:35','14:00'], AAPL: ['09:35','14:00'], GOOGL:['09:35','14:00'],
+  META: ['09:35','14:00'], MSFT: ['09:35','14:00'], NFLX: ['09:35','14:00'],
 };
 // SPRT applies to these tickers for YES entries
 const SPRT_TICKERS = new Set(['AMZN','TSLA']);
+// Reversal NO win rates (mirrors config.py REVERSAL_NO_WR — keep in sync)
+const REVERSAL_NO_WR = {
+  NVDA:0.848, AAPL:0.711, GOOGL:0.692, AMZN:0.686, TSLA:0.667,
+  SPX:0.658, NFLX:0.609, META:0.606, MSFT:0.595,
+};
+const REVERSAL_EDGE_MIN_JS = 0.12;
+const FEE_PCT = 0.01;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const quotes = {};
@@ -342,8 +349,14 @@ function buildCard(t) {
   const gapDir = gap>50?'up':gap<-50?'down':'flat';
   const gapStr = gap!=null?(gap>0?`▲ +${gap}`:gap<0?`▼ ${gap}`:' 0')+' bps at open':'—';
   const gapUp  = gap>50, gapDn = gap<-50;
-  const tradeDir = gapUp?'BUY YES':gapDn?'BUY NO':'NO TRADE';
-  const beDisp = (gapUp&&q.yes_ask)?((q.yes_ask/0.99)*100).toFixed(1)+'%':(gapDn&&q.no_ask)?((q.no_ask/0.99)*100).toFixed(1)+'%':'—';
+  // Gap crossed prev_close check needed here for tradeDir — computed properly below
+  const _cgapEarly = q.current_gap_bps??null;
+  const _gapCrossedEarly = (gap != null && _cgapEarly != null) &&
+    ((gap > 50 && _cgapEarly < 0) || (gap < -50 && _cgapEarly > 0));
+  const tradeDir = (gapUp && _gapCrossedEarly) ? 'BUY NO (REVERSAL)' : gapUp ? 'BUY YES' : gapDn ? 'BUY NO' : 'NO TRADE';
+  const beDisp = (gapUp && _gapCrossedEarly && q.no_ask) ? ((q.no_ask/0.99)*100).toFixed(1)+'%' :
+                 (gapUp&&q.yes_ask)?((q.yes_ask/0.99)*100).toFixed(1)+'%':
+                 (gapDn&&q.no_ask)?((q.no_ask/0.99)*100).toFixed(1)+'%':'—';
 
   // Session status
   const isAborted  = ss.aborted.includes(t);
@@ -352,12 +365,51 @@ function buildCard(t) {
   const inCooldown = cooldownSec > 0;
   const remaining  = ss.remaining_fractions[t] ?? null;
 
+  // Stock movement — needed early for gapCrossed check
+  const smv   = q.stock_move_pct??null;
+  const cgap  = q.current_gap_bps??null;
+  const gfr   = q.gfr??null;
+  const gfrI  = gfrInfo(gfr);
+  const smvCls  = smv==null?'neutral':smv>0?'pos':'neg';
+  const cgapCls = cgap==null?'neutral':cgap>0?'pos':'neg';
+  const smvStr  = smv!=null?(smv>=0?`▲ +${smv.toFixed(2)}%`:`▼ ${smv.toFixed(2)}%`):'—';
+  const cgapStr = cgap!=null?((cgap>=0?`▲ +${cgap}`:` ▼ ${cgap}`)+' bps vs close'):'—';
+
+  // Gap crossed prev_close: opening gap direction has fully reversed intraday.
+  // When true: adj_WR is invalid (different regime), suppress edge display.
+  const gapCrossed = (gap != null && cgap != null) &&
+    ((gap > 50 && cgap < 0) || (gap < -50 && cgap > 0));
+
+  // Reversal NO edge — valid when gap has crossed prev_close (GFR < -1.0 territory).
+  // Uses per-ticker historical NO win rates, not the YES-direction adj_wr.
+  let revEdge = null, revEdgeStr = '—', revEdgeCls = 'neutral';
+  if (gapCrossed && q.no_ask && q.no_ask >= 0.40 && q.no_ask <= 0.70) {
+    const revWr = REVERSAL_NO_WR[t] ?? 0.67;
+    revEdge = revWr * (1 - FEE_PCT) - q.no_ask;
+    revEdgeStr = (revEdge >= 0 ? '+' : '') + (revEdge * 100).toFixed(1) + '%';
+    revEdgeCls = revEdge >= REVERSAL_EDGE_MIN_JS ? 'good' : revEdge >= 0 ? 'warn' : 'bad';
+  }
+
+  // When reversed: show reversal NO context. adj_wr in q is YES-direction (invalid here).
+  const adjWr    = gapCrossed
+    ? `REVERSAL — NO edge ${revEdgeStr}`
+    : (q.adj_wr!=null?(q.adj_wr*100).toFixed(1)+'%':'—');
+  const adjWrCls = gapCrossed
+    ? (revEdge !== null && revEdge >= REVERSAL_EDGE_MIN_JS ? 'good' : revEdge !== null && revEdge >= 0 ? 'warn' : 'bad')
+    : 'neutral';
+
   // Signal
   const win  = entryWindowStatus(t);
   const sig  = (q.signal||(has?'WAIT':'NO DATA')).toLowerCase();
   const edge = q.live_edge??q.est_edge??null;
-  const edgeStr = (sig==='flat'||sig==='wait'||sig==='no data')?'—':fPct(edge);
+  const edgeStr = (sig==='flat'||sig==='wait'||sig==='no data') ? '—' :
+                  gapCrossed ? revEdgeStr :
+                  fPct(edge);
 
+  // FADE = GFR < -0.3: stock has moved 30%+ against the gap direction.
+  // For gap-UP YES: stock fell 30%+ below open → gap reversing, thesis at risk.
+  // For gap-DOWN NO: stock bounced 30%+ above open → gap reversing, thesis at risk.
+  // Meaning is symmetric — both cases say the gap is failing.
   const sigLabels = {
     go:'GO — Enter now', watch:'WATCH — Thin edge',
     fade:'FADE — Gap reversing', skip:'SKIP — No edge',
@@ -366,19 +418,8 @@ function buildCard(t) {
   };
   const sigLabel = sigLabels[sig]||sig.toUpperCase();
   const sigNote  = sig==='fade'
-    ? 'Gap reversed intraday — original thesis failed.'
+    ? 'Gap reversed against the open — thesis at risk, no new entries.'
     : sig==='skip' ? 'Edge negative at current ask — don\'t enter.' : '';
-
-  // Stock
-  const smv   = q.stock_move_pct??null;
-  const cgap  = q.current_gap_bps??null;
-  const gfr   = q.gfr??null;
-  const gfrI  = gfrInfo(gfr);
-  const adjWr = q.adj_wr!=null?(q.adj_wr*100).toFixed(1)+'%':'—';
-  const smvCls  = smv==null?'neutral':smv>0?'pos':'neg';
-  const cgapCls = cgap==null?'neutral':cgap>0?'pos':'neg';
-  const smvStr  = smv!=null?(smv>=0?`▲ +${smv.toFixed(2)}%`:`▼ ${smv.toFixed(2)}%`):'—';
-  const cgapStr = cgap!=null?((cgap>=0?`▲ +${cgap}`:` ▼ ${cgap}`)+' bps vs close'):'—';
 
   // Settlement model
   const pWin   = q.settlement_p_win??null;
@@ -404,7 +445,7 @@ function buildCard(t) {
 
   // NO trailing stop state (for NO open positions)
   let noStopHtml = '';
-  if (gapDn && isEntered) {
+  if ((gapDn || (gapUp && gapCrossed)) && isEntered) {
     const peak = ss.no_peaks[t] ?? null;
     const ep   = q.no_ask;
     if (peak && ep) {
@@ -465,7 +506,7 @@ function buildCard(t) {
     <div class="stk-row"><span class="stk-label">Stock from open</span><span class="stk-val ${smvCls}">${smvStr}</span></div>
     <div class="stk-row"><span class="stk-label">vs Yesterday close</span><span class="stk-val ${cgapCls}">${cgapStr}</span></div>
     <div class="stk-row"><span class="stk-label">Gap fill (GFR)</span><span class="stk-val ${gfrI.cls}">${gfrI.text}</span></div>
-    <div class="stk-row"><span class="stk-label">Adj WR (Bayesian)</span><span class="stk-val neutral">${adjWr}</span></div>
+    <div class="stk-row"><span class="stk-label">Adj WR (Bayesian)</span><span class="stk-val ${adjWrCls}">${adjWr}</span></div>
   </div>
   <div class="z-clob">
     <div class="ptable">

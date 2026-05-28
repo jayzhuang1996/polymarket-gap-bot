@@ -10,7 +10,7 @@ import yfinance as yf
 import engine.state as state
 from config import (
     TICKERS, GAMMA_API, CLOB_API, MONTH_NAMES, SLUG_OVERRIDES,
-    TRADING_FEE_PCT, BAYES_LAMBDA,
+    TRADING_FEE_PCT, BAYES_LAMBDA, BAYES_STEEP_LAMBDA,
 )
 from engine.strategy import _compute_signal, ET_OFFSET_H
 from engine.settlement_model import predict as settlement_predict, is_available as settlement_available
@@ -109,6 +109,27 @@ async def _fetch_all_prices_async() -> dict[str, float]:
     return result
 
 
+def _bayesian_adj_wr(base_wr: float, gfr: float, direction_sign: int) -> float:
+    """Two-slope Bayesian WR adjustment.
+
+    direction_sign = +1 for gap-up YES trades, -1 for gap-down NO trades.
+    signed_gfr > 0  → stock moved in gap direction (thesis holding)
+    signed_gfr < 0  → stock fading against gap (thesis at risk)
+    signed_gfr < -1 → stock crossed prev_close (regime change: steep penalty)
+
+    Linear above the breakpoint; BAYES_STEEP_LAMBDA below it.
+    Prevents the linear formula from showing 63% adj_WR when the stock has
+    already crossed prev_close (GFR = -2.12 → adj_wr ≈ 21% with base 0.75).
+    """
+    signed_gfr = gfr * direction_sign
+    if signed_gfr >= -1.0:
+        adj = BAYES_LAMBDA * signed_gfr
+    else:
+        # Stock crossed prev_close: apply steep discount from the -1.0 breakpoint.
+        adj = BAYES_LAMBDA * (-1.0) + BAYES_STEEP_LAMBDA * (signed_gfr + 1.0)
+    return min(0.95, max(0.05, base_wr + adj))
+
+
 async def stock_price_loop():
     """Poll Yahoo Finance every 5 seconds; compute GFR, adj_wr, edge, signal and broadcast."""
     payout = 1.0 - TRADING_FEE_PCT
@@ -138,10 +159,10 @@ async def stock_price_loop():
                 yes_wr, no_wr  = state.wr_cache.get(display, (0.55, 0.45))
 
                 if gap_up:
-                    adj_wr    = min(0.95, max(0.05, yes_wr + BAYES_LAMBDA * gfr * direction_sign))
+                    adj_wr    = _bayesian_adj_wr(yes_wr, gfr, direction_sign)
                     entry_ask = q.get("yes_ask")
                 elif gap_dn:
-                    adj_wr    = min(0.95, max(0.05, no_wr + BAYES_LAMBDA * gfr * direction_sign))
+                    adj_wr    = _bayesian_adj_wr(no_wr, gfr, direction_sign)
                     entry_ask = q.get("no_ask")
                 else:
                     adj_wr    = None
