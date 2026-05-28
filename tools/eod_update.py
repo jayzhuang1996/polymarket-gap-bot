@@ -357,25 +357,29 @@ def eod_update(target_date: date | None = None, skip_trades: bool = False) -> di
     print(f"  {d}: scraping {len(TICKERS)} tickers...")
 
     for display_name, yahoo_ticker in TICKERS:
+        # ── 1 & 2: Fetch market metadata and yfinance data ──────────────────────
+        # These are prerequisites — if either fails, skip this ticker entirely.
         try:
-            # ── 1. Find resolved market ──
             from tools.scrape_history import find_resolved_market, get_yfinance_data, slug_for
-
-            slug = slug_for(display_name, yahoo_ticker, d)
+            slug   = slug_for(display_name, yahoo_ticker, d)
             market = find_resolved_market(slug)
             if not market:
                 print(f"    {display_name:6s}: no resolved market")
                 continue
-
-            # ── 2. Get yfinance data ──
             yd = get_yfinance_data(yahoo_ticker, d)
             if not yd:
                 print(f"    {display_name:6s}: no yfinance data")
                 result["errors"] += 1
                 continue
+        except Exception as e:
+            print(f"    {display_name:6s}: ERROR fetching data — {e}")
+            result["errors"] += 1
+            continue
 
-            # ── 3. Fetch ALL trades (full day's activity) ──
-            if not skip_trades and market.get("condition_id"):
+        # ── 3: Trade scraping — independent; failure does NOT block observation ─
+        trade_note = ""
+        if not skip_trades and market.get("condition_id"):
+            try:
                 new_trades = fetch_all_trades(market["condition_id"])
                 if not new_trades.empty:
                     appended = append_trades_to_parquet(display_name, new_trades)
@@ -383,22 +387,22 @@ def eod_update(target_date: date | None = None, skip_trades: bool = False) -> di
                     trade_note = f" (+{appended} trades)" if appended > 0 else ""
                 else:
                     trade_note = " (0 trades)"
-            else:
-                trade_note = ""
+            except Exception as e:
+                trade_note = f" (trades skipped: {type(e).__name__})"
 
-            # ── 4. Store gap+outcome observation ──
-            outcome_str = "UP" if market["outcome"] == "YES" else "DOWN"
-            gap_label = f"{yd['gap_pct']*10000:+.0f} bps"
-            match = "✓" if (market["outcome"] == "YES") == yd["close_up"] else "✗"
-            print(f"    {display_name:6s}: gap={gap_label}, close={outcome_str} {match}{trade_note}")
-
+        # ── 4: Store gap+outcome observation — always runs if market + yd are ok ─
+        outcome_str = "UP" if market["outcome"] == "YES" else "DOWN"
+        gap_label   = f"{yd['gap_pct']*10000:+.0f} bps"
+        match       = "✓" if (market["outcome"] == "YES") == yd["close_up"] else "✗"
+        print(f"    {display_name:6s}: gap={gap_label}, close={outcome_str} {match}{trade_note}")
+        try:
             store_observation(d, display_name, yd["gap_pct"], yd["close_up"])
             result["observations_stored"] += 1
-            time.sleep(0.3)
-
         except Exception as e:
-            print(f"    {display_name:6s}: ERROR — {e}")
+            print(f"    {display_name:6s}: ERROR storing observation — {e}")
             result["errors"] += 1
+
+        time.sleep(0.3)
 
     # ── 5. Update WR table ──
     if result["observations_stored"] > 0:

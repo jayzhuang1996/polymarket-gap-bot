@@ -205,7 +205,7 @@ def api_health():
     Returns DB backend, last scan time, today's row counts, and trading status.
     Green means data is flowing. Use this every morning before market open.
     """
-    from database.db import _pg_available, USE_PG, DB_PATH, get_scan_log
+    from database.db import _pg_available, _pg_last_error, USE_PG, DB_PATH, get_scan_log
     import os
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -224,7 +224,7 @@ def api_health():
         db_status  = "connected"
     elif USE_PG and not _pg_available:
         db_backend = "sqlite_fallback"
-        db_status  = "supabase_unavailable"
+        db_status  = f"supabase_unavailable: {_pg_last_error or 'unknown error'}"
     else:
         db_backend = "sqlite"
         db_status  = "ok"

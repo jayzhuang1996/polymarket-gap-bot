@@ -110,7 +110,10 @@ async def trading_session_loop():
 
     while True:
         await asyncio.sleep(120)
-        if not _in_market_hours():
+        h_now, m_now = _et_now_hm()
+        # Run until 4:30pm ET so time exits and settlement exits fire after 3pm hard exit.
+        # Only skip during overnight hours (before 9:30am or after 4:30pm).
+        if (h_now, m_now) < (9, 30) or (h_now, m_now) >= (16, 30):
             continue
 
         h, m  = _et_now_hm()

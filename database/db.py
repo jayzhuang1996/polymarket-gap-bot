@@ -18,8 +18,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 USE_PG = bool(DATABASE_URL)
 
 # Flipped to False by init_db() when the PG connection fails at startup.
-# _conn() checks this and falls back to SQLite so the server keeps running.
+# Auto-retries every PG_RETRY_INTERVAL_SEC so transient startup failures self-heal.
 _pg_available = True
+_pg_last_error: str | None = None     # last connection error — exposed via /api/health
+_pg_retry_after: float = 0.0          # epoch seconds; retry PG after this time
+PG_RETRY_INTERVAL_SEC = 300           # retry Supabase every 5 minutes after failure
 
 DB_PATH = os.getenv(
     "DATABASE_PATH",
@@ -105,12 +108,23 @@ class _PgConn:
 
 
 def _conn():
-    if USE_PG and _pg_available:
-        dsn = DATABASE_URL
-        # Supabase requires SSL; append if not already specified
-        if "sslmode" not in dsn:
-            dsn = dsn + ("&" if "?" in dsn else "?") + "sslmode=require"
-        return _PgConn(dsn)
+    import time as _time
+    global _pg_available, _pg_last_error, _pg_retry_after
+    if USE_PG:
+        # Retry PG after interval if it was unavailable — self-heals transient startup failures.
+        if not _pg_available and _time.time() >= _pg_retry_after:
+            _pg_available = True  # optimistically re-enable; will flip back on failure below
+        if _pg_available:
+            try:
+                dsn = DATABASE_URL
+                if "sslmode" not in dsn:
+                    dsn = dsn + ("&" if "?" in dsn else "?") + "sslmode=require"
+                return _PgConn(dsn)
+            except Exception as e:
+                _pg_available = False
+                _pg_last_error = str(e)
+                _pg_retry_after = _time.time() + PG_RETRY_INTERVAL_SEC
+                print(f"  PG unavailable ({e}) — falling back to SQLite, retry in {PG_RETRY_INTERVAL_SEC}s")
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
