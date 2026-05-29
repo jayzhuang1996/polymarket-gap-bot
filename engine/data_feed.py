@@ -99,12 +99,16 @@ async def _fetch_all_prices_async() -> dict[str, float]:
                     params={"interval": "1m", "range": "1d"},
                 )
                 if resp.status_code != 200:
+                    print(f"[price_feed] {display} HTTP {resp.status_code}")
                     continue
                 meta = resp.json().get("chart", {}).get("result", [{}])[0].get("meta", {})
                 price = meta.get("regularMarketPrice") or meta.get("previousClose")
                 if price and float(price) > 0:
                     result[display] = float(price)
-            except Exception:
+                else:
+                    print(f"[price_feed] {display} no price in meta: {list(meta.keys())}")
+            except Exception as e:
+                print(f"[price_feed] {display} exception: {e}")
                 continue
     return result
 
@@ -225,7 +229,7 @@ async def stock_price_loop():
 
                 state.broadcast_queue.put_nowait(json.dumps({"type": "quote", **q}))
 
-        except Exception:
-            pass
+        except Exception as _e:
+            print(f"[stock_price_loop] ERROR: {_e}")
 
         await asyncio.sleep(5)
