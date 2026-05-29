@@ -28,7 +28,7 @@ from holidays import NYSE
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database.db import init_db
+from database.db import init_db, get_unresolved_decisions, store_outcome
 from database.wr_store import daily_update, update_stock_priors
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -304,6 +304,37 @@ def _sync_sqlite_to_supabase(d: date) -> None:
     print(f"  Supabase REST sync: {n_scan} scan rows, {n_dec} decisions, {n_out} outcomes")
 
 
+# ── Stale position cleanup ─────────────────────────────────────────────────────
+
+def _close_stale_open_positions(before_date: str) -> int:
+    """Force-close any unresolved decisions from before today.
+
+    If Railway crashed before 3pm, the session loop never wrote a store_outcome()
+    call for that position. It then shows up in the dashboard the next day as an
+    open position and blocks new entries for that ticker.
+
+    This runs once per EOD cron before scraping begins.
+    """
+    rows = [r for r in get_unresolved_decisions() if r["date"] < before_date]
+    closed = 0
+    for row in rows:
+        try:
+            store_outcome(
+                row["id"],
+                row["date"],
+                row["ticker"],
+                resolved_yes=None,
+                pnl_usd=None,
+                exit_price=None,
+                exit_type="force_close_eod",
+            )
+            print(f"  [stale] Closed {row['ticker']} {row['date']} (no prior outcome recorded)")
+            closed += 1
+        except Exception as e:
+            print(f"  [stale] Could not close {row['ticker']} {row['date']}: {e}")
+    return closed
+
+
 # ── Core Logic ─────────────────────────────────────────────────────────────────
 
 def eod_update(target_date: date | None = None, skip_trades: bool = False) -> dict:
@@ -412,6 +443,13 @@ def main():
     init_db()  # establishes DB connection; sets _pg_available=False on pooler failure
     print(f"[{dt.now(timezone.utc).isoformat()}] EOD Update")
     print()
+
+    # Always clean up stale open positions before scraping today's outcomes.
+    # Handles the case where Railway crashed mid-session and the 3pm exit never fired.
+    today_str = date.today().isoformat()
+    stale = _close_stale_open_positions(today_str)
+    if stale:
+        print(f"  Closed {stale} stale position(s) from prior sessions\n")
 
     if args.backfill_trades:
         total_trades = 0

@@ -219,7 +219,7 @@ header{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap
       <span id="scanner-updated" style="opacity:0.7;">updates every 2 min</span>
     </div>
     <div class="panel-body" id="scanner-body">
-      <div class="panel-empty">Waiting for market open (9:35 AM ET)</div>
+      <div class="panel-empty">Waiting for entry window (9:35 AM ET)</div>
     </div>
   </div>
 
@@ -258,15 +258,7 @@ const ENTRY_WINDOWS = {
   AMZN: ['09:35','14:00'], AAPL: ['09:35','14:00'], GOOGL:['09:35','14:00'],
   META: ['09:35','14:00'], MSFT: ['09:35','14:00'], NFLX: ['09:35','14:00'],
 };
-// SPRT applies to these tickers for YES entries
-const SPRT_TICKERS = new Set(['AMZN','TSLA']);
-// Reversal NO win rates (mirrors config.py REVERSAL_NO_WR — keep in sync)
-const REVERSAL_NO_WR = {
-  NVDA:0.848, AAPL:0.711, GOOGL:0.692, AMZN:0.686, TSLA:0.667,
-  SPX:0.658, NFLX:0.609, META:0.606, MSFT:0.595,
-};
-const REVERSAL_EDGE_MIN_JS = 0.12;
-const FEE_PCT = 0.01;
+const SETTLEMENT_YES_THRESHOLD = 0.55;
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const quotes = {};
@@ -275,7 +267,7 @@ let openPositions = [];
 let sessionState  = {
   vix_zone: 'UNKNOWN', vix_change: null, vix_high: false,
   aborted: [], entered: [], cooldowns: {}, remaining_fractions: {},
-  exit_triggers_fired: {}, no_peaks: {}, sprt: {}, edge_min: 0.05,
+  exit_triggers_fired: {}, no_peaks: {}, edge_min: 0.05,
   is_thursday: false, is_late_entry: false, entry_frozen: false,
 };
 
@@ -344,135 +336,111 @@ function buildCard(t) {
   const has = q.yes_bid!=null || q.no_bid!=null;
   const ss  = sessionState;
 
-  // Gap / direction
+  // Gap info (context only — direction comes from model, not gap hardcoding)
   const gap    = q.gap_bps ?? null;
   const gapDir = gap>50?'up':gap<-50?'down':'flat';
   const gapStr = gap!=null?(gap>0?`▲ +${gap}`:gap<0?`▼ ${gap}`:' 0')+' bps at open':'—';
-  const gapUp  = gap>50, gapDn = gap<-50;
-  // Gap crossed prev_close check needed here for tradeDir — computed properly below
-  const _cgapEarly = q.current_gap_bps??null;
-  const _gapCrossedEarly = (gap != null && _cgapEarly != null) &&
-    ((gap > 50 && _cgapEarly < 0) || (gap < -50 && _cgapEarly > 0));
-  const tradeDir = (gapUp && _gapCrossedEarly) ? 'BUY NO (REVERSAL)' : gapUp ? 'BUY YES' : gapDn ? 'BUY NO' : 'NO TRADE';
-  const beDisp = (gapUp && _gapCrossedEarly && q.no_ask) ? ((q.no_ask/0.99)*100).toFixed(1)+'%' :
-                 (gapUp&&q.yes_ask)?((q.yes_ask/0.99)*100).toFixed(1)+'%':
-                 (gapDn&&q.no_ask)?((q.no_ask/0.99)*100).toFixed(1)+'%':'—';
 
   // Session status
-  const isAborted  = ss.aborted.includes(t);
-  const isEntered  = ss.entered.includes(t);
+  const isAborted   = ss.aborted.includes(t);
+  const isEntered   = ss.entered.includes(t);
   const cooldownSec = ss.cooldowns[t] || 0;
-  const inCooldown = cooldownSec > 0;
-  const remaining  = ss.remaining_fractions[t] ?? null;
+  const inCooldown  = cooldownSec > 0;
+  const remaining   = ss.remaining_fractions[t] ?? null;
 
-  // Stock movement — needed early for gapCrossed check
-  const smv   = q.stock_move_pct??null;
-  const cgap  = q.current_gap_bps??null;
-  const gfr   = q.gfr??null;
-  const gfrI  = gfrInfo(gfr);
-  const smvCls  = smv==null?'neutral':smv>0?'pos':'neg';
-  const cgapCls = cgap==null?'neutral':cgap>0?'pos':'neg';
-  const smvStr  = smv!=null?(smv>=0?`▲ +${smv.toFixed(2)}%`:`▼ ${smv.toFixed(2)}%`):'—';
-  const cgapStr = cgap!=null?((cgap>=0?`▲ +${cgap}`:` ▼ ${cgap}`)+' bps vs close'):'—';
+  // ── Settlement model — primary signal ────────────────────────────────────
+  const pYes = q.settlement_p_win ?? null;
+  const pYesStr = pYes != null ? (pYes*100).toFixed(0)+'%' : '—';
 
-  // Gap crossed prev_close: opening gap direction has fully reversed intraday.
-  // When true: adj_WR is invalid (different regime), suppress edge display.
-  const gapCrossed = (gap != null && cgap != null) &&
-    ((gap > 50 && cgap < 0) || (gap < -50 && cgap > 0));
+  // Model direction: ≥0.55 → YES, ≤0.45 → NO, middle → SKIP
+  let modelDir = pYes == null ? null : pYes >= SETTLEMENT_YES_THRESHOLD ? 'YES' : pYes <= (1 - SETTLEMENT_YES_THRESHOLD) ? 'NO' : 'SKIP';
 
-  // Reversal NO edge — valid when gap has crossed prev_close (GFR < -1.0 territory).
-  // Uses per-ticker historical NO win rates, not the YES-direction adj_wr.
-  let revEdge = null, revEdgeStr = '—', revEdgeCls = 'neutral';
-  if (gapCrossed && q.no_ask && q.no_ask >= 0.40 && q.no_ask <= 0.70) {
-    const revWr = REVERSAL_NO_WR[t] ?? 0.67;
-    revEdge = revWr * (1 - FEE_PCT) - q.no_ask;
-    revEdgeStr = (revEdge >= 0 ? '+' : '') + (revEdge * 100).toFixed(1) + '%';
-    revEdgeCls = revEdge >= REVERSAL_EDGE_MIN_JS ? 'good' : revEdge >= 0 ? 'warn' : 'bad';
-  }
+  // Per-side live edges: settlement_p × payout(0.99) − ask
+  const yesEdge = (pYes != null && q.yes_ask != null) ? pYes * 0.99 - q.yes_ask : null;
+  const noEdge  = (pYes != null && q.no_ask  != null) ? (1 - pYes) * 0.99 - q.no_ask : null;
+  const fEdge   = v => v != null ? (v>=0?'+':'')+(v*100).toFixed(1)+'%' : '—';
+  const yesEdgeStr = fEdge(yesEdge);
+  const noEdgeStr  = fEdge(noEdge);
+  const eCls  = v => v==null?'neutral':v>=0.08?'good':v>=0?'warn':'bad';
+  const yesEdgeCls = eCls(yesEdge);
+  const noEdgeCls  = eCls(noEdge);
 
-  // When reversed: show reversal NO context. adj_wr in q is YES-direction (invalid here).
-  const adjWr    = gapCrossed
-    ? `REVERSAL — NO edge ${revEdgeStr}`
-    : (q.adj_wr!=null?(q.adj_wr*100).toFixed(1)+'%':'—');
-  const adjWrCls = gapCrossed
-    ? (revEdge !== null && revEdge >= REVERSAL_EDGE_MIN_JS ? 'good' : revEdge !== null && revEdge >= 0 ? 'warn' : 'bad')
-    : 'neutral';
+  // Primary edge for signal strip header
+  const primaryEdge = modelDir==='YES' ? yesEdge : modelDir==='NO' ? noEdge : null;
+  const primaryEdgeStr = fEdge(primaryEdge);
 
-  // Signal
-  const win  = entryWindowStatus(t);
-  const sig  = (q.signal||(has?'WAIT':'NO DATA')).toLowerCase();
-  const edge = q.live_edge??q.est_edge??null;
-  const edgeStr = (sig==='flat'||sig==='wait'||sig==='no data') ? '—' :
-                  gapCrossed ? revEdgeStr :
-                  fPct(edge);
-
-  // FADE = GFR < -0.3: stock has moved 30%+ against the gap direction.
-  // For gap-UP YES: stock fell 30%+ below open → gap reversing, thesis at risk.
-  // For gap-DOWN NO: stock bounced 30%+ above open → gap reversing, thesis at risk.
-  // Meaning is symmetric — both cases say the gap is failing.
-  const sigLabels = {
-    go:'GO — Enter now', watch:'WATCH — Thin edge',
-    fade:'FADE — Gap reversing', skip:'SKIP — No edge',
-    flat:'FLAT — Gap < 0.5%', wait:'WAIT — Loading',
-    'no data':'NO DATA'
-  };
-  const sigLabel = sigLabels[sig]||sig.toUpperCase();
-  const sigNote  = sig==='fade'
-    ? 'Gap reversed against the open — thesis at risk, no new entries.'
-    : sig==='skip' ? 'Edge negative at current ask — don\'t enter.' : '';
-
-  // Settlement model
-  const pWin   = q.settlement_p_win??null;
-  const pWinStr = pWin!=null ? (pWin*100).toFixed(0)+'% win prob' : '—';
-  const pWinCls = pWinClass(pWin);
-
-  // SPRT
-  let sprtHtml = '';
-  if (SPRT_TICKERS.has(t) && gapUp) {
-    const sprtInfo = ss.sprt[t];
-    if (sprtInfo) {
-      const lrStr = `LR=${sprtInfo.lr.toFixed(2)}`;
-      const stCls = sprtInfo.status==='ENTER'?'sprt-enter':sprtInfo.status==='ABORT'?'sprt-abort':'sprt-watch';
-      sprtHtml = `<div class="algo-row"><span class="algo-lbl">SPRT (${lrStr})</span><span class="algo-val ${stCls}">${sprtInfo.status}</span></div>`;
-    }
-  }
-
-  // Edge floor (show only if non-default or Thursday)
-  const edgeMin  = ss.edge_min ?? 0.05;
-  const edgeFloor = (edgeMin*100).toFixed(0)+'%';
+  // ── Entry gate ───────────────────────────────────────────────────────────
+  const win       = entryWindowStatus(t);
+  const floorNow  = ss.edge_min ?? 0.05;
+  const edgeFloor = (floorNow*100).toFixed(0)+'%';
   const edgeNote  = ss.is_thursday?' (THU)':ss.is_late_entry?' (LATE)':ss.entry_frozen?' (FROZEN)':'';
   const edgeCls   = ss.entry_frozen?'warn':'neutral';
+  const srvSig    = (q.signal || (has?'WAIT':'NO DATA')).toLowerCase();
 
-  // NO trailing stop state (for NO open positions)
+  // ── Signal strip ─────────────────────────────────────────────────────────
+  let sigLabel, sigNote, sigStrip;
+  if (!has || srvSig === 'no data') {
+    sigLabel = 'NO DATA'; sigNote = ''; sigStrip = 'wait';
+  } else if (srvSig === 'flat') {
+    sigLabel = 'FLAT — Gap below threshold'; sigNote = ''; sigStrip = 'flat';
+  } else if (srvSig === 'fade') {
+    sigLabel = 'FADE — Gap reversing'; sigNote = 'Stock moved against gap; thesis at risk.'; sigStrip = 'fade';
+  } else if (modelDir === null || modelDir === 'SKIP') {
+    sigLabel = `SKIP — Model dead-zone (P(YES) ${pYesStr})`; sigNote = 'Model uncertain: 0.45–0.55 range, no entry.'; sigStrip = 'skip';
+  } else if (!win.open) {
+    sigLabel = `${modelDir} — ${win.text}`; sigNote = 'Entry window not open.'; sigStrip = 'watch';
+  } else if (ss.entry_frozen) {
+    sigLabel = `${modelDir} — FROZEN after 2pm`; sigNote = 'Hard freeze at 14:00 ET.'; sigStrip = 'watch';
+  } else if (primaryEdge != null && primaryEdge < floorNow) {
+    sigLabel = `${modelDir} — Below ${edgeFloor} floor`;
+    sigNote  = `Edge ${primaryEdgeStr} needs ${edgeFloor} to enter${ss.is_thursday?' (Thu flat floor).':'.'}`;
+    sigStrip = 'watch';
+  } else {
+    sigLabel = `MODEL → ${modelDir}`;
+    sigNote  = '';
+    sigStrip = modelDir==='YES'?'go':modelDir==='NO'?'fade':'skip';
+  }
+
+  // ── P(YES) color: ≥0.55 green, ≤0.45 orange, middle gray ────────────────
+  const pYesCls = pYes==null?'neutral':pYes>=SETTLEMENT_YES_THRESHOLD?'good':pYes<=(1-SETTLEMENT_YES_THRESHOLD)?'warn':'neutral';
+
+  // ── Stock section — model features ───────────────────────────────────────
+  const stockPos = q.stock_pct_vs_prevclose ?? null;
+  const momentum = q.momentum_30min ?? null;
+  const gfr      = q.gfr ?? null;
+  const gfrI     = gfrInfo(gfr);
+
+  const stockPosCls = stockPos==null?'neutral':stockPos>0?'pos':'neg';
+  const stockPosStr = stockPos!=null ? (stockPos>=0?`▲ +${stockPos.toFixed(2)}%`:`▼ ${stockPos.toFixed(2)}%`) : '—';
+
+  // Momentum: positive = stock drifting further from prev_close (thesis strengthening)
+  const momCls = momentum==null?'neutral':Math.abs(momentum)<0.1?'neutral':momentum>0?'pos':'neg';
+  const momArrow = momentum==null?'':Math.abs(momentum)<0.1?' →':momentum>0?' ↑':' ↓';
+  const momStr = momentum!=null ? (momentum>=0?'+':'')+(momentum).toFixed(2)+'%'+momArrow : '—';
+
+  // ── NO trail stop (when positioned NO) ───────────────────────────────────
   let noStopHtml = '';
-  if ((gapDn || (gapUp && gapCrossed)) && isEntered) {
+  if (isEntered) {
     const peak = ss.no_peaks[t] ?? null;
-    const ep   = q.no_ask;
-    if (peak && ep) {
+    if (peak && q.no_bid) {
       const toTrigger = peak - 0.08;
-      const gap2trig  = q.no_bid ? (q.no_bid - toTrigger) : null;
+      const gap2trig  = q.no_bid - toTrigger;
       const lockFired = (ss.exit_triggers_fired[t]||[]).includes('no_profit_lock');
-      if (gap2trig !== null) {
-        const cls = gap2trig < 0.02 ? 'bad' : gap2trig < 0.05 ? 'warn' : 'good';
-        noStopHtml = `<div class="algo-row"><span class="algo-lbl">Trail stop gap</span><span class="algo-val ${cls}">${gap2trig>=0?'+':''}${(gap2trig*100).toFixed(1)}¢ to trigger</span></div>`;
-      }
-      if (lockFired) {
-        noStopHtml += `<div class="algo-row"><span class="algo-lbl">Profit lock</span><span class="algo-val good">FIRED ✓ (50% sold)</span></div>`;
-      }
+      const cls = gap2trig < 0.02 ? 'bad' : gap2trig < 0.05 ? 'warn' : 'good';
+      noStopHtml = `<div class="algo-row"><span class="algo-lbl">Trail stop gap</span><span class="algo-val ${cls}">${gap2trig>=0?'+':''}${(gap2trig*100).toFixed(0)}¢ to trigger</span></div>`;
+      if (lockFired) noStopHtml += `<div class="algo-row"><span class="algo-lbl">Profit lock</span><span class="algo-val good">FIRED ✓ (50% sold)</span></div>`;
     }
   }
 
-  // Card-level CSS class
-  const cardCls = `card ${has?'':'nodata'}${isAborted?' aborted-card':''}`;
-
-  // Status banners
-  const abortBanner  = isAborted
-    ? `<div class="status-strip aborted">ABORTED — no re-entry today (SPRT or trail stop)</div>` : '';
+  // ── Status banners ────────────────────────────────────────────────────────
+  const abortBanner   = isAborted
+    ? `<div class="status-strip aborted">ABORTED — no re-entry today</div>` : '';
   const cooldownBanner = (!isAborted && inCooldown)
     ? `<div class="status-strip cooldown">GFR COOLDOWN — re-entry in ${Math.ceil(cooldownSec/60)}m</div>` : '';
   const enteredBanner = (!isAborted && !inCooldown && isEntered && remaining !== null)
     ? `<div class="status-strip entered">POSITIONED${remaining<1?' — '+(remaining*100).toFixed(0)+'% remaining':''}</div>` : '';
 
+  const cardCls = `card ${has?'':'nodata'}${isAborted?' aborted-card':''}`;
   const ysc = sc(q.yes_spread), nsc = sc(q.no_spread);
   const ysv = q.yes_spread!=null?q.yes_spread.toFixed(1)+'%':'—';
   const nsv = q.no_spread!=null? q.no_spread.toFixed(1)+'%':'—';
@@ -486,27 +454,26 @@ function buildCard(t) {
     </div>
     <div class="ctx-right">
       <div class="ctx-gap-open ${gapDir}">${gapStr}</div>
-      <div class="ctx-meta">${tradeDir} · Break-even ${beDisp}</div>
       <div class="ctx-window ${win.cls}">${win.text}</div>
     </div>
   </div>
   ${abortBanner}${cooldownBanner}${enteredBanner}
-  <div class="z-signal ${sig}">
+  <div class="z-signal ${sigStrip}">
     <span class="sig-label">${sigLabel}</span>
-    <span class="sig-edge">${edgeStr}</span>
+    <span class="sig-edge">${primaryEdgeStr}</span>
     ${sigNote?`<span class="sig-note">${sigNote}</span>`:''}
   </div>
   <div class="z-algo">
-    <div class="algo-row"><span class="algo-lbl">Settlement P(win)</span><span class="algo-val ${pWinCls}">${pWinStr}</span></div>
-    ${sprtHtml}
+    <div class="algo-row"><span class="algo-lbl">Settlement P(YES)</span><span class="algo-val ${pYesCls}">${pYesStr}</span></div>
+    <div class="algo-row"><span class="algo-lbl">YES edge</span><span class="algo-val ${yesEdgeCls}">${yesEdgeStr}</span></div>
+    <div class="algo-row"><span class="algo-lbl">NO edge</span><span class="algo-val ${noEdgeCls}">${noEdgeStr}</span></div>
     ${noStopHtml}
-    <div class="algo-row"><span class="algo-lbl">Edge floor${edgeNote}</span><span class="algo-val ${edgeCls}">${edgeFloor}</span></div>
+    <div class="algo-row"><span class="algo-lbl">Entry floor${edgeNote}</span><span class="algo-val ${edgeCls}">${edgeFloor}</span></div>
   </div>
   <div class="z-stock">
-    <div class="stk-row"><span class="stk-label">Stock from open</span><span class="stk-val ${smvCls}">${smvStr}</span></div>
-    <div class="stk-row"><span class="stk-label">vs Yesterday close</span><span class="stk-val ${cgapCls}">${cgapStr}</span></div>
+    <div class="stk-row"><span class="stk-label">Stock vs prev_close</span><span class="stk-val ${stockPosCls}">${stockPosStr}</span></div>
+    <div class="stk-row"><span class="stk-label">Momentum (30m)</span><span class="stk-val ${momCls}">${momStr}</span></div>
     <div class="stk-row"><span class="stk-label">Gap fill (GFR)</span><span class="stk-val ${gfrI.cls}">${gfrI.text}</span></div>
-    <div class="stk-row"><span class="stk-label">Adj WR (Bayesian)</span><span class="stk-val ${adjWrCls}">${adjWr}</span></div>
   </div>
   <div class="z-clob">
     <div class="ptable">
@@ -515,7 +482,7 @@ function buildCard(t) {
       <span class="pc lbl">NO</span><span class="pc">${f3(q.no_ask)}</span><span class="pc">${f3(q.no_bid)}</span><span class="pc ${nsc}">${nsv}</span>
     </div>
   </div>
-  <div class="card-foot"><span>Prices ${etFmt(q.updated_at)} ET</span><span>${warn}</span></div>
+  <div class="card-foot"><span>Updated ${etFmt(q.updated_at)} ET</span><span>${warn}</span></div>
 </div>`;
 }
 
@@ -855,7 +822,7 @@ async function loadScanner() {
     const upd  = document.getElementById('scanner-updated');
 
     if (!rows || rows.length === 0) {
-      body.innerHTML = '<div class="panel-empty">Waiting for market open (9:35 AM ET)</div>';
+      body.innerHTML = '<div class="panel-empty">Waiting for entry window (9:35 AM ET)</div>';
       return;
     }
 
@@ -870,22 +837,25 @@ async function loadScanner() {
       <table class="scan-table">
         <thead><tr>
           <th>Ticker</th><th>Signal</th><th>Gap</th>
-          <th>Edge</th><th>adj WR</th><th>Time</th>
+          <th>P(YES)</th><th>Edge</th><th>Time</th>
         </tr></thead>
         <tbody>
           ${SIG_ORDER.map(t => {
-            const r = byTicker[t];
+            const r  = byTicker[t];
+            const lq = quotes[t] || {};
             if (!r) return `<tr><td>${t}</td><td class="sig-unknown" colspan="5">no data</td></tr>`;
-            const gap  = r.gap_bps != null ? (r.gap_bps > 0 ? '+' : '') + Math.round(r.gap_bps) + ' bps' : '—';
-            const edge = r.edge  != null ? (r.edge  > 0 ? '+' : '') + (r.edge*100).toFixed(1)  + '%' : '—';
-            const wr   = r.adj_wr != null ? (r.adj_wr*100).toFixed(0) + '%' : '—';
-            const sc   = sigClass(r.signal);
+            const gap   = r.gap_bps != null ? (r.gap_bps > 0 ? '+' : '') + Math.round(r.gap_bps) + ' bps' : '—';
+            const edge  = r.edge != null ? (r.edge > 0 ? '+' : '') + (r.edge*100).toFixed(1) + '%' : '—';
+            const pYes  = lq.settlement_p_win;
+            const pYesDisp = pYes != null ? (pYes*100).toFixed(0) + '%' : '—';
+            const pYesStyle = pYes==null?'':pYes>=0.55?'color:var(--green);font-weight:500':pYes<=0.45?'color:var(--orange);font-weight:500':'color:var(--ink3)';
+            const sc    = sigClass(r.signal);
             return `<tr>
               <td style="font-weight:600">${t}</td>
               <td class="${sc}">${r.signal || '—'}</td>
               <td>${gap}</td>
+              <td style="${pYesStyle}">${pYesDisp}</td>
               <td>${edge}</td>
-              <td>${wr}</td>
               <td style="color:var(--ink3)">${fmtScanTime(r.scanned_at)}</td>
             </tr>`;
           }).join('')}

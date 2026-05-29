@@ -243,9 +243,15 @@ async def trading_session_loop():
             if len(hist) > 6:
                 hist.pop(0)
 
-        # ── Load open positions ───────────────────────────────────────────
+        # ── Load open positions (today only — stale prior-day positions ──────
+        # are force-closed by eod_update.py and must not block today's entries)
+        _today_str = datetime.now().strftime("%Y-%m-%d")
         try:
-            open_positions = {row["ticker"]: dict(row) for row in get_unresolved_decisions()}
+            open_positions = {
+                row["ticker"]: dict(row)
+                for row in get_unresolved_decisions()
+                if row["date"] == _today_str
+            }
         except Exception:
             open_positions = {}
 
