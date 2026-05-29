@@ -85,8 +85,10 @@ async def lifespan(app: FastAPI):
     print(f"  Gaps: {len(gap_data)}/{len(TICKERS)} tickers")
 
     for display, _yahoo in TICKERS:
-        gap_up = (state.current_quotes.get(display, {}).get("gap_bps") or 0) > 0
-        yes_wr, no_wr, _obs = load_base_wr(display, gap_up)
+        gap_bps = state.current_quotes.get(display, {}).get("gap_bps") or 0
+        gap_up  = gap_bps > 0
+        gap_pct = gap_bps / 10_000.0
+        yes_wr, no_wr, _obs = load_base_wr(display, gap_up, gap_pct=gap_pct)
         state.wr_cache[display] = (yes_wr, no_wr)
     print(f"  WR cache: {len(state.wr_cache)} tickers")
 

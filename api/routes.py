@@ -118,7 +118,7 @@ async def api_preflight():
     """
     import time
     import requests as _req
-    from database.db import _pg_available, USE_PG, DB_PATH, store_scan_log, get_scan_log
+    from database.db import DB_PATH, store_scan_log, get_scan_log
     from database.wr_store import load_base_wr
 
     checks = {}
@@ -138,13 +138,8 @@ async def api_preflight():
     checks["volume_mounted"]  = "ok" if DB_PATH.startswith("/data") else f"WARN: path is {DB_PATH} — data lost on redeploy"
     checks["db_file_exists"]  = "ok" if _os.path.exists(DB_PATH) else "WARN: file not found yet (first run?)"
 
-    # 3. DB backend
-    if USE_PG and _pg_available:
-        checks["db_backend"] = "supabase (connected)"
-    elif USE_PG and not _pg_available:
-        checks["db_backend"] = "sqlite_fallback (supabase unavailable)"
-    else:
-        checks["db_backend"] = "sqlite (local only)"
+    # 3. DB backend (always SQLite + Supabase REST mirror)
+    checks["db_backend"] = "sqlite"
 
     # 4. WR cache loaded
     try:
@@ -205,7 +200,7 @@ def api_health():
     Returns DB backend, last scan time, today's row counts, and trading status.
     Green means data is flowing. Use this every morning before market open.
     """
-    from database.db import _pg_available, _pg_last_error, USE_PG, DB_PATH, get_scan_log
+    from database.db import _rest_ok, _rest_last_error, DB_PATH, get_scan_log
     import os
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -218,16 +213,8 @@ def api_health():
         last_scan  = last.get("scanned_at")
         last_ticker = last.get("ticker")
 
-    # DB backend
-    if USE_PG and _pg_available:
-        db_backend = "supabase"
-        db_status  = "connected"
-    elif USE_PG and not _pg_available:
-        db_backend = "sqlite_fallback"
-        db_status  = f"supabase_unavailable: {_pg_last_error or 'unknown error'}"
-    else:
-        db_backend = "sqlite"
-        db_status  = "ok"
+    db_backend = "sqlite"
+    db_status  = "ok"
 
     # Volume check — is SQLite on a persistent path?
     db_path         = DB_PATH
@@ -245,6 +232,7 @@ def api_health():
         "in_market_hours": in_window,
         "db_backend":    db_backend,
         "db_status":     db_status,
+        "supabase_rest": "ok" if _rest_ok else f"error: {_rest_last_error}",
         "db_path":       db_path,
         "volume_mounted": volume_mounted,
         "db_file_exists": db_file_exists,
@@ -370,3 +358,69 @@ def api_export_daily(date: str = Query(None, description="YYYY-MM-DD, defaults t
         "decisions": decisions,
         "outcomes":  outcomes,
     }
+
+
+@router.post("/api/admin/sync-supabase")
+def api_sync_supabase(date: str = Query(None, description="YYYY-MM-DD, defaults to today")):
+    """Push SQLite rows for a given date to Supabase via REST API.
+
+    Use this to:
+    - Backfill days where Supabase was missing data (May 27-28)
+    - Verify Supabase is receiving data correctly
+    - Repair any gap after a deployment or network failure
+
+    Idempotent — safe to call multiple times for the same date.
+    Returns counts of rows pushed to each table.
+    """
+    import os, requests as _req
+    supabase_url = "https://dftkwvdhwkbtjxutgqzy.supabase.co"
+    anon_key = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmdGt3dmRod2tidGp4dXRncXp5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3NjA4NjAsImV4cCI6MjA5NTMzNjg2MH0"
+        ".d2Ey5WynBgGp3sTtKSEbHlKSd9ZhnrSIWFChykgOdcw"
+    )
+    key = os.getenv("SUPABASE_KEY", anon_key)
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=ignore-duplicates,return=minimal",
+    }
+
+    date_str  = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    scan      = get_scan_log(date_str)
+    decisions = [dict(r) for r in get_decisions_by_date(date_str)]
+    outcomes  = [dict(r) for r in get_outcomes_for_date(date_str)]
+
+    results = {}
+
+    def _push(table: str, rows: list[dict], keep_keys: list[str]) -> dict:
+        if not rows:
+            return {"pushed": 0, "status": "nothing_to_push"}
+        payload = [{k: r.get(k) for k in keep_keys} for r in rows]
+        try:
+            resp = _req.post(f"{supabase_url}/rest/v1/{table}",
+                             json=payload, headers=headers, timeout=30)
+            if resp.status_code in (200, 201):
+                return {"pushed": len(payload), "status": "ok"}
+            return {"pushed": 0, "status": f"HTTP {resp.status_code}", "detail": resp.text[:300]}
+        except Exception as e:
+            return {"pushed": 0, "status": "error", "detail": str(e)}
+
+    results["scan_log"] = _push("scan_log", scan, [
+        "date", "scanned_at", "ticker", "et_time", "gap_bps",
+        "yes_ask", "yes_bid", "adj_wr", "edge", "gfr",
+        "gfr_velocity", "settlement_p_win", "signal", "vix_change",
+    ])
+    results["decisions"] = _push("decisions", decisions, [
+        "date", "ticker", "slug", "gap_bps", "yes_bid", "yes_ask",
+        "spread_bps", "entry_side", "entry_price", "position_size",
+        "decision", "expected_edge", "book_depth", "adj_wr",
+        "gfr_at_entry", "spread_at_entry", "created_at",
+    ])
+    results["outcomes"] = _push("outcomes", outcomes, [
+        "decision_id", "date", "ticker", "resolved_yes",
+        "pnl_usd", "closed_at", "exit_price", "exit_type",
+    ])
+
+    return {"date": date_str, "supabase_url": supabase_url, "results": results}

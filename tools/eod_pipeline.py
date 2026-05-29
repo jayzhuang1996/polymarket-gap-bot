@@ -5,8 +5,9 @@ Steps (each must succeed before the next runs):
   1. eod_update      → scrapes today's resolved Polymarket market, appends raw
                         trades to *_trades.parquet, stores gap+outcome in DB,
                         updates daily_wr
-  2. full_session    → reads *_trades.parquet + yfinance intraday, rebuilds
-                        data/full_session_2min.csv with today's 2-min bars
+  2. extend_2min     → appends today's 2-min VWAP intervals to full_session_2min.csv
+                        and regenerates settlement_probability.csv
+                        (uses parquet metadata pre-May-2026, Gamma API after)
   3. calibrate_exit  → reads full_session_2min.csv, rebuilds
                         data/exit_model_calibration.csv
   4. train_model     → reads full_session_2min.csv, retrains
@@ -61,8 +62,10 @@ def main():
         print("\nPipeline aborted — step 1 failed. DB not updated.")
         sys.exit(1)
 
-    # ── Step 2: Rebuild full_session_2min.csv from all parquet trade data ──
-    if not _run("Step 2/4  full_session_analysis", TOOLS / "full_session_analysis.py"):
+    # ── Step 2: Append today's 2-min intervals to full_session_2min.csv ─────
+    today_str = args.date or date.today().isoformat()
+    if not _run("Step 2/4  extend_2min_data", TOOLS / "extend_2min_data.py",
+                ["--from", today_str, "--to", today_str]):
         print("\nStep 2 failed — 2-min data not refreshed. Models NOT retrained.")
         sys.exit(1)
 

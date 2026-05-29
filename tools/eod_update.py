@@ -241,97 +241,67 @@ def store_observation(d: date, display_name: str, gap_pct: float, close_up: bool
 # ── Supabase Sync ──────────────────────────────────────────────────────────────
 
 def _sync_sqlite_to_supabase(d: date) -> None:
-    """Push today's SQLite rows to Supabase as a best-effort EOD mirror.
+    """Push today's SQLite rows to Supabase via REST API (PostgREST).
 
-    Safe to call even when Supabase is unavailable — any failure is logged
-    and silently swallowed so the rest of eod_update continues.
-
-    Tables synced: scan_log, decisions, outcomes.
-    Uses INSERT ... ON CONFLICT DO NOTHING so re-runs are idempotent.
-    Only runs when DATABASE_URL is set AND SQLite is the current backend
-    (i.e. _pg_available is False, meaning we wrote to SQLite during the day).
+    Uses HTTP POST to bypass the broken psycopg2/pooler path.
+    Safe to call when Supabase is unavailable — failures are logged and swallowed.
+    Idempotent: Supabase will ignore duplicate rows on conflict.
     """
-    import os
-    db_url = os.getenv("DATABASE_URL")
-    if not db_url:
-        return  # no Supabase configured
+    import os, requests as _req
+    supabase_url = "https://dftkwvdhwkbtjxutgqzy.supabase.co"
+    anon_key = (
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmdGt3dmRod2tidGp4dXRncXp5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3NjA4NjAsImV4cCI6MjA5NTMzNjg2MH0"
+        ".d2Ey5WynBgGp3sTtKSEbHlKSd9ZhnrSIWFChykgOdcw"
+    )
+    key = os.getenv("SUPABASE_KEY", anon_key)
+    headers = {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=ignore-duplicates,return=minimal",
+    }
 
-    from database.db import _pg_available, get_scan_log, get_decisions_by_date, get_outcomes_for_date
-    if _pg_available:
-        return  # already writing to Supabase directly — nothing to sync
-
-    date_str = d.isoformat()
+    from database.db import get_scan_log, get_decisions_by_date, get_outcomes_for_date
+    date_str  = d.isoformat()
     scan      = get_scan_log(date_str)
-    decisions = get_decisions_by_date(date_str)
-    outcomes  = get_outcomes_for_date(date_str)
+    decisions = [dict(r) for r in get_decisions_by_date(date_str)]
+    outcomes  = [dict(r) for r in get_outcomes_for_date(date_str)]
 
     if not scan and not decisions and not outcomes:
-        return  # nothing to sync
+        return
 
-    try:
-        import psycopg2
-        if "sslmode" not in db_url:
-            db_url = db_url + ("&" if "?" in db_url else "?") + "sslmode=require"
-        pg = psycopg2.connect(db_url)
-        cur = pg.cursor()
+    def _post_batch(table: str, rows: list[dict], keep_keys: list[str]) -> int:
+        if not rows:
+            return 0
+        payload = [{k: r.get(k) for k in keep_keys} for r in rows]
+        try:
+            r = _req.post(f"{supabase_url}/rest/v1/{table}",
+                          json=payload, headers=headers, timeout=30)
+            if r.status_code in (200, 201):
+                return len(payload)
+            print(f"  Supabase {table} sync HTTP {r.status_code}: {r.text[:200]}")
+            return 0
+        except Exception as e:
+            print(f"  Supabase {table} sync error: {e}")
+            return 0
 
-        # scan_log — idempotent upsert on (date, ticker, scanned_at)
-        for row in scan:
-            cur.execute("""
-                INSERT INTO scan_log
-                    (date, scanned_at, ticker, et_time, gap_bps, yes_ask, yes_bid,
-                     adj_wr, edge, gfr, gfr_velocity, settlement_p_win, signal, vix_change)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-            """, (
-                row["date"], row["scanned_at"], row["ticker"], row.get("et_time"),
-                row.get("gap_bps"), row.get("yes_ask"), row.get("yes_bid"),
-                row.get("adj_wr"), row.get("edge"), row.get("gfr"),
-                row.get("gfr_velocity"), row.get("settlement_p_win"),
-                row.get("signal"), row.get("vix_change"),
-            ))
-
-        # decisions — idempotent on (date, ticker, created_at)
-        for row in decisions:
-            cur.execute("""
-                INSERT INTO decisions
-                    (date, ticker, slug, gap_bps, yes_bid, yes_ask, spread_bps,
-                     entry_side, entry_price, position_size, decision,
-                     expected_edge, book_depth, adj_wr, gfr_at_entry,
-                     spread_at_entry, created_at)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-            """, (
-                row["date"], row["ticker"], row.get("slug"),
-                row.get("gap_bps"), row.get("yes_bid"), row.get("yes_ask"),
-                row.get("spread_bps"), row.get("entry_side"), row.get("entry_price"),
-                row.get("position_size"), row["decision"], row.get("expected_edge"),
-                row.get("book_depth"), row.get("adj_wr"), row.get("gfr_at_entry"),
-                row.get("spread_at_entry"), row["created_at"],
-            ))
-
-        # outcomes
-        for row in outcomes:
-            cur.execute("""
-                INSERT INTO outcomes
-                    (decision_id, date, ticker, resolved_yes, pnl_usd,
-                     closed_at, exit_price, exit_type)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                ON CONFLICT DO NOTHING
-            """, (
-                row["decision_id"], row["date"], row["ticker"],
-                row.get("resolved_yes"), row.get("pnl_usd"),
-                row.get("closed_at"), row.get("exit_price"),
-                row.get("exit_type", "resolve"),
-            ))
-
-        pg.commit()
-        cur.close()
-        pg.close()
-        print(f"  Supabase sync: {len(scan)} scan rows, "
-              f"{len(decisions)} decisions, {len(outcomes)} outcomes")
-    except Exception as e:
-        print(f"  Supabase sync skipped ({e})")
+    n_scan = _post_batch("scan_log", scan, [
+        "date", "scanned_at", "ticker", "et_time", "gap_bps",
+        "yes_ask", "yes_bid", "adj_wr", "edge", "gfr",
+        "gfr_velocity", "settlement_p_win", "signal", "vix_change",
+    ])
+    n_dec = _post_batch("decisions", decisions, [
+        "date", "ticker", "slug", "gap_bps", "yes_bid", "yes_ask",
+        "spread_bps", "entry_side", "entry_price", "position_size",
+        "decision", "expected_edge", "book_depth", "adj_wr",
+        "gfr_at_entry", "spread_at_entry", "created_at",
+    ])
+    n_out = _post_batch("outcomes", outcomes, [
+        "decision_id", "date", "ticker", "resolved_yes",
+        "pnl_usd", "closed_at", "exit_price", "exit_type",
+    ])
+    print(f"  Supabase REST sync: {n_scan} scan rows, {n_dec} decisions, {n_out} outcomes")
 
 
 # ── Core Logic ─────────────────────────────────────────────────────────────────

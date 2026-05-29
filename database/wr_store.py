@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime, date, timezone
 from typing import Optional
 
-from database.db import _conn, DB_PATH, USE_PG
+from database.db import _conn, DB_PATH
 
 # ── Hardcoded defaults — 5-year daily OHLC (May 2020 – May 2025, ~1,255 days) ──
 # Source: tools pulled via yfinance on May 24 2026. Per-ticker gap threshold
@@ -33,7 +33,19 @@ HARDCODED_WR: dict[tuple[str, bool], float] = {
 }
 
 MIN_OBS_FOR_DB_WR = 30  # minimum observations before DB value is considered at all
+MIN_OBS_BUCKET    = 15  # lower threshold for gap-bucket rows (smaller per-bucket n)
 PRIOR_WEIGHT = 50       # raised from 20 → 50 to reflect 200–400 obs backing each prior
+
+GAP_BUCKET_THRESHOLDS = (0.005, 0.015)  # <0.5% = small, 0.5–1.5% = medium, >1.5% = large
+
+
+def _gap_bucket(gap_pct: float) -> str:
+    abs_gap = abs(gap_pct)
+    if abs_gap < GAP_BUCKET_THRESHOLDS[0]:
+        return "small"
+    if abs_gap < GAP_BUCKET_THRESHOLDS[1]:
+        return "medium"
+    return "large"
 
 # ── Prior isolation ────────────────────────────────────────────────────────────
 # The prior-building period ends Jan 31 2026. Only data before this date is
@@ -52,18 +64,23 @@ def _ensure_wr_table():
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS daily_wr (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker      TEXT    NOT NULL,
-                direction   TEXT    NOT NULL,  -- 'gap_up' or 'gap_down'
-                win_rate    REAL    NOT NULL,
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker       TEXT    NOT NULL,
+                direction    TEXT    NOT NULL,  -- 'gap_up' or 'gap_down'
+                gap_bucket   TEXT    NOT NULL DEFAULT 'all',  -- 'all' | 'small' | 'medium' | 'large'
+                win_rate     REAL    NOT NULL,
                 observations INTEGER NOT NULL,
-                source      TEXT    NOT NULL DEFAULT 'computed',  -- 'computed' | 'hardcoded'
-                updated_at  TEXT    NOT NULL
+                source       TEXT    NOT NULL DEFAULT 'computed',
+                updated_at   TEXT    NOT NULL
             );
         """)
+        # Migration: add gap_bucket column to existing tables that predate this schema
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(daily_wr)").fetchall()]
+        if "gap_bucket" not in cols:
+            conn.execute("ALTER TABLE daily_wr ADD COLUMN gap_bucket TEXT NOT NULL DEFAULT 'all'")
         conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_daily_wr_ticker
-            ON daily_wr(ticker, direction);
+            CREATE INDEX IF NOT EXISTS idx_daily_wr_ticker_bucket
+            ON daily_wr(ticker, direction, gap_bucket);
         """)
         conn.commit()
     finally:
@@ -284,14 +301,7 @@ def rebuild_priors():
 
     conn = _conn()
     try:
-        if USE_PG:
-            # PostgreSQL: check information_schema
-            col_rows = conn.execute(
-                "SELECT column_name FROM information_schema.columns WHERE table_name = 'scraped_observations'"
-            ).fetchall()
-            cols = [r["column_name"] for r in col_rows]
-        else:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(scraped_observations)").fetchall()]
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(scraped_observations)").fetchall()]
         if "date" not in cols:
             print("  rebuild_priors: scraped_observations has no 'date' column — skipping.")
             return 0
@@ -338,26 +348,28 @@ def rebuild_priors():
 # ── Load WR ───────────────────────────────────────────────────────────────────
 
 
-def load_base_wr(ticker: str, gap_up: bool, require_obs: int = MIN_OBS_FOR_DB_WR) -> tuple[float, float, int]:
+def load_base_wr(
+    ticker: str,
+    gap_up: bool,
+    gap_pct: float | None = None,
+    require_obs: int = MIN_OBS_FOR_DB_WR,
+) -> tuple[float, float, int]:
     """Return (yes_wr, no_wr, effective_obs) using a Bayesian blend of prior + observed data.
+
+    When gap_pct is provided, attempts a bucket-specific WR lookup first (small/medium/large).
+    Falls back to the flat 'all' rate if the bucket has fewer than MIN_OBS_BUCKET observations.
 
     Prior source (in order of preference):
       1. isolated_priors table — built from data before PRIOR_PERIOD_END only.
-         This is the correct independent prior.
-      2. HARDCODED_WR — fallback. Derived from full dataset; not truly independent.
-         Use rebuild_priors() to graduate to option 1.
+      2. HARDCODED_WR — fallback (full dataset, not truly independent).
 
     Bayesian blend: blended = (prior_wr × PRIOR_WEIGHT + obs_wr × obs) / (PRIOR_WEIGHT + obs)
-    At obs=10: ⅓ empirical + ⅔ prior.  At obs=50: 71% empirical + 29% prior.
-
-    effective_obs is returned so the caller can compute CI-based Kelly sizing:
-      effective_obs = PRIOR_WEIGHT + actual scraped observations
     """
     _ensure_wr_table()
     _ensure_priors_table()
     direction = "gap_up" if gap_up else "gap_down"
 
-    # 1. Try isolated prior first (independent); fall back to hardcoded
+    # 1. Prior (independent period or hardcoded fallback)
     conn = _conn()
     try:
         prior_row = conn.execute(
@@ -369,24 +381,47 @@ def load_base_wr(ticker: str, gap_up: bool, require_obs: int = MIN_OBS_FOR_DB_WR
 
     prior_wr = prior_row["win_rate"] if prior_row else HARDCODED_WR.get((ticker, gap_up), 0.60)
 
-    # 2. Live Bayesian update from scraped observations (Feb 2026 onward)
-    conn = _conn()
-    try:
-        row = conn.execute(
-            "SELECT win_rate, observations FROM daily_wr WHERE ticker = ? AND direction = ? ORDER BY updated_at DESC LIMIT 1",
-            (ticker, direction),
-        ).fetchone()
-    finally:
-        conn.close()
+    # 2. Observed WR: try bucket-specific row first, fall back to flat 'all'
+    obs_row = None
+    obs_min  = require_obs  # threshold that applies to obs_row
+    if gap_pct is not None:
+        bucket = _gap_bucket(gap_pct)
+        conn = _conn()
+        try:
+            obs_row = conn.execute(
+                "SELECT win_rate, observations FROM daily_wr"
+                " WHERE ticker = ? AND direction = ? AND gap_bucket = ?"
+                " ORDER BY updated_at DESC LIMIT 1",
+                (ticker, direction, bucket),
+            ).fetchone()
+        finally:
+            conn.close()
+        if obs_row and obs_row["observations"] >= MIN_OBS_BUCKET:
+            obs_min = MIN_OBS_BUCKET  # bucket row — lower threshold applies
+        else:
+            obs_row = None  # not enough data — fall through to flat
 
-    if row and row["observations"] >= require_obs:
-        obs_wr    = row["win_rate"]
-        obs_count = row["observations"]
+    if obs_row is None:
+        conn = _conn()
+        try:
+            obs_row = conn.execute(
+                "SELECT win_rate, observations FROM daily_wr"
+                " WHERE ticker = ? AND direction = ? AND gap_bucket = 'all'"
+                " ORDER BY updated_at DESC LIMIT 1",
+                (ticker, direction),
+            ).fetchone()
+        finally:
+            conn.close()
+        obs_min = require_obs  # flat row — original threshold
+
+    if obs_row and obs_row["observations"] >= obs_min:
+        obs_wr    = obs_row["win_rate"]
+        obs_count = obs_row["observations"]
         blended   = (prior_wr * PRIOR_WEIGHT + obs_wr * obs_count) / (PRIOR_WEIGHT + obs_count)
         effective_obs = PRIOR_WEIGHT + obs_count
     else:
         blended       = prior_wr
-        effective_obs = PRIOR_WEIGHT  # only prior data — CI will be wide
+        effective_obs = PRIOR_WEIGHT
 
     if gap_up:
         return blended, 1.0 - blended, effective_obs
@@ -405,17 +440,18 @@ def hardcoded_yes_wr(ticker: str, gap_up: bool) -> float:
 def daily_update():
     """Recompute per-ticker WR from scraped_observations table only.
 
-    Paper trade outcomes are excluded from WR aggregation to prevent
-    feedback-loop contamination.  The Bayesian blend in load_base_wr()
-    handles combining hardcoded prior with observed data.
+    Stores two kinds of rows:
+      gap_bucket='all'    — flat rate across all gap sizes (existing behavior)
+      gap_bucket='small'|'medium'|'large' — conditioned on gap magnitude
 
+    Paper trade outcomes are excluded to prevent feedback-loop contamination.
     Call after each scrape run or resolve.
     """
     _ensure_wr_table()
 
     conn = _conn()
     try:
-        rows = conn.execute("""
+        flat_rows = conn.execute("""
             SELECT
                 ticker,
                 CASE WHEN gap_pct > 0 THEN 'gap_up' ELSE 'gap_down' END as direction,
@@ -424,36 +460,55 @@ def daily_update():
             FROM scraped_observations
             GROUP BY ticker, direction
         """).fetchall()
+
+        bucket_rows = conn.execute("""
+            SELECT
+                ticker,
+                CASE WHEN gap_pct > 0 THEN 'gap_up' ELSE 'gap_down' END as direction,
+                CASE
+                    WHEN ABS(gap_pct) < 0.005 THEN 'small'
+                    WHEN ABS(gap_pct) < 0.015 THEN 'medium'
+                    ELSE 'large'
+                END as gap_bucket,
+                COUNT(*) as obs,
+                SUM(CASE WHEN (gap_pct > 0 AND close_up = 1) OR (gap_pct < 0 AND close_up = 0) THEN 1 ELSE 0 END) as wins
+            FROM scraped_observations
+            GROUP BY ticker, direction, gap_bucket
+        """).fetchall()
     finally:
         conn.close()
 
     now = datetime.now(timezone.utc).isoformat()
     stored = 0
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
 
-    for r in rows:
-        key = (r["ticker"], r["direction"])
-        obs, wins = r["obs"], r["wins"] or 0
-        if obs < MIN_OBS_FOR_DB_WR or key in seen:
-            continue
+    def _upsert(ticker: str, direction: str, gap_bucket: str, obs: int, wins: int, min_obs: int) -> None:
+        nonlocal stored
+        key = (ticker, direction, gap_bucket)
+        if obs < min_obs or key in seen:
+            return
         seen.add(key)
         wr = round(wins / obs, 4)
-
         conn = _conn()
         try:
-            # Delete any existing rows for this (ticker, direction) before inserting
-            # the fresh value — keeps the table at one row per pair, no duplicates.
             conn.execute(
-                "DELETE FROM daily_wr WHERE ticker = ? AND direction = ?",
-                (r["ticker"], r["direction"]),
+                "DELETE FROM daily_wr WHERE ticker = ? AND direction = ? AND gap_bucket = ?",
+                (ticker, direction, gap_bucket),
             )
             conn.execute(
-                "INSERT INTO daily_wr (ticker, direction, win_rate, observations, source, updated_at) VALUES (?, ?, ?, ?, 'computed', ?)",
-                (r["ticker"], r["direction"], wr, obs, now),
+                "INSERT INTO daily_wr (ticker, direction, gap_bucket, win_rate, observations, source, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, 'computed', ?)",
+                (ticker, direction, gap_bucket, wr, obs, now),
             )
             conn.commit()
         finally:
             conn.close()
         stored += 1
+
+    for r in flat_rows:
+        _upsert(r["ticker"], r["direction"], "all", r["obs"], r["wins"] or 0, MIN_OBS_FOR_DB_WR)
+
+    for r in bucket_rows:
+        _upsert(r["ticker"], r["direction"], r["gap_bucket"], r["obs"], r["wins"] or 0, MIN_OBS_BUCKET)
 
     return stored

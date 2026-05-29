@@ -1,10 +1,14 @@
 """
-Database module for paper trade tracking.
+Database module for the Polymarket bot.
 
-Single-file interface to SQLite (local) or PostgreSQL (Railway/Supabase).
-Backend is selected at startup via DATABASE_URL env var:
-  - Set DATABASE_URL → psycopg2 (PostgreSQL/Supabase)
-  - Not set          → sqlite3  (local dev, default)
+Always uses SQLite as the primary store — fast, local, no network dependency.
+On Railway: SQLite lives at /data/polymarket.db (persistent volume).
+Locally:    SQLite lives at data/polymarket.db.
+
+Supabase is a read/write mirror via REST API (PostgREST). It is never the
+primary store — SQLite always succeeds first, then REST fires in a background
+thread. The psycopg2 / TCP path to Supabase is permanently broken for this
+project (pooler returns "Tenant or user not found") and has been removed.
 
 All DB access goes through this module.
 """
@@ -14,15 +18,21 @@ import os
 from datetime import date, datetime, timezone
 from typing import Optional
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-USE_PG = bool(DATABASE_URL)
+# ── Supabase REST mirror (PostgREST — bypasses broken psycopg2/pooler path) ──
+# psycopg2 path fails with "Tenant or user not found" for this project.
+# PostgREST REST API works with anon key — confirmed INSERT 201 locally.
+# SUPABASE_KEY env var should be set to the service_role key on Railway so it
+# bypasses RLS; falls back to anon key (which also works for inserts currently).
+_SUPABASE_URL = "https://dftkwvdhwkbtjxutgqzy.supabase.co"
+_ANON_KEY = (
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+    ".eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRmdGt3dmRod2tidGp4dXRncXp5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk3NjA4NjAsImV4cCI6MjA5NTMzNjg2MH0"
+    ".d2Ey5WynBgGp3sTtKSEbHlKSd9ZhnrSIWFChykgOdcw"
+)
+_SUPABASE_KEY = os.getenv("SUPABASE_KEY", _ANON_KEY)
 
-# Flipped to False by init_db() when the PG connection fails at startup.
-# Auto-retries every PG_RETRY_INTERVAL_SEC so transient startup failures self-heal.
-_pg_available = True
-_pg_last_error: str | None = None     # last connection error — exposed via /api/health
-_pg_retry_after: float = 0.0          # epoch seconds; retry PG after this time
-PG_RETRY_INTERVAL_SEC = 300           # retry Supabase every 5 minutes after failure
+_rest_ok: bool = True                # tracks REST API reachability
+_rest_last_error: str | None = None  # last REST error — exposed via /api/health
 
 DB_PATH = os.getenv(
     "DATABASE_PATH",
@@ -30,101 +40,45 @@ DB_PATH = os.getenv(
 )
 
 
-# ── PostgreSQL connection wrapper ────────────────────────────────────────────
 
 
-class _PgConn:
-    """Wraps psycopg2 connection to look like sqlite3.Connection.
+# ── Supabase REST helpers ────────────────────────────────────────────────────
 
-    - execute(sql, params) returns self (supports .fetchone()/.fetchall()/.lastrowid)
-    - ? placeholder is translated to %s
-    - executescript(sql) splits on ; and runs each statement
-    - Context manager commits on success, rolls back + closes on exception
-    """
 
-    def __init__(self, dsn: str):
-        import psycopg2
-        import psycopg2.extras
-        self._pg = psycopg2.connect(dsn)
-        self._cur = self._pg.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-    @staticmethod
-    def _adapt(sql: str) -> str:
-        return sql.replace("?", "%s")
-
-    def execute(self, sql: str, params=()):
-        self._cur.execute(self._adapt(sql), params or [])
-        return self
-
-    def executemany(self, sql: str, seq):
-        self._cur.executemany(self._adapt(sql), seq)
-
-    def executescript(self, script: str):
-        for stmt in (s.strip() for s in script.split(";") if s.strip()):
-            self._cur.execute(stmt)
-
-    def fetchone(self):
-        return self._cur.fetchone()  # RealDictRow — row["col"] works
-
-    def fetchall(self):
-        return self._cur.fetchall()  # list[RealDictRow]
-
-    @property
-    def lastrowid(self):
-        # INSERT must include RETURNING id; reads the single returned row
-        row = self._cur.fetchone()
-        if row and "id" in row:
-            return row["id"]
-        return None
-
-    def commit(self):
-        self._pg.commit()
-
-    def rollback(self):
-        self._pg.rollback()
-
-    def close(self):
-        try:
-            self._cur.close()
-        except Exception:
-            pass
-        try:
-            self._pg.close()
-        except Exception:
-            pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, *_):
-        if exc_type:
-            self._pg.rollback()
+def _rest_insert_sync(table: str, row: dict) -> None:
+    """Synchronous POST to Supabase PostgREST — called from background thread."""
+    global _rest_ok, _rest_last_error
+    try:
+        import requests as _req
+        url = f"{_SUPABASE_URL}/rest/v1/{table}"
+        headers = {
+            "apikey": _SUPABASE_KEY,
+            "Authorization": f"Bearer {_SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        }
+        resp = _req.post(url, json=row, headers=headers, timeout=10)
+        if resp.status_code in (200, 201):
+            _rest_ok = True
+            _rest_last_error = None
         else:
-            self._pg.commit()
-        self.close()
+            _rest_ok = False
+            _rest_last_error = f"REST {table} HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        _rest_ok = False
+        _rest_last_error = str(e)[:200]
+
+
+def _rest_insert(table: str, row: dict) -> None:
+    """Fire-and-forget Supabase REST insert. Never blocks the SQLite write path."""
+    import threading
+    threading.Thread(target=_rest_insert_sync, args=(table, row), daemon=True).start()
 
 
 # ── Connection ───────────────────────────────────────────────────────────────
 
 
-def _conn():
-    import time as _time
-    global _pg_available, _pg_last_error, _pg_retry_after
-    if USE_PG:
-        # Retry PG after interval if it was unavailable — self-heals transient startup failures.
-        if not _pg_available and _time.time() >= _pg_retry_after:
-            _pg_available = True  # optimistically re-enable; will flip back on failure below
-        if _pg_available:
-            try:
-                dsn = DATABASE_URL
-                if "sslmode" not in dsn:
-                    dsn = dsn + ("&" if "?" in dsn else "?") + "sslmode=require"
-                return _PgConn(dsn)
-            except Exception as e:
-                _pg_available = False
-                _pg_last_error = str(e)
-                _pg_retry_after = _time.time() + PG_RETRY_INTERVAL_SEC
-                print(f"  PG unavailable ({e}) — falling back to SQLite, retry in {PG_RETRY_INTERVAL_SEC}s")
+def _conn() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
@@ -137,49 +91,7 @@ def _conn():
 
 
 def init_db():
-    """Create tables if they don't exist.
-
-    On PostgreSQL (Railway): tables are already created by the Supabase migration.
-    We just verify the connection and run safe ADD COLUMN IF NOT EXISTS migrations.
-    On SQLite (local): full schema creation.
-    """
-    global _pg_available
-    if USE_PG:
-        try:
-            conn = _conn()
-            try:
-                for migration in [
-                    "ALTER TABLE outcomes ADD COLUMN IF NOT EXISTS exit_price REAL",
-                    "ALTER TABLE outcomes ADD COLUMN IF NOT EXISTS exit_type TEXT DEFAULT 'resolve'",
-                    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS adj_wr REAL",
-                    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS gfr_at_entry REAL",
-                    "ALTER TABLE decisions ADD COLUMN IF NOT EXISTS spread_at_entry REAL",
-                    """CREATE TABLE IF NOT EXISTS scan_log (
-                        id BIGSERIAL PRIMARY KEY,
-                        date DATE NOT NULL,
-                        scanned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        ticker TEXT NOT NULL,
-                        et_time TEXT,
-                        gap_bps REAL, yes_ask REAL, yes_bid REAL,
-                        adj_wr REAL, edge REAL, gfr REAL, gfr_velocity REAL,
-                        settlement_p_win REAL, signal TEXT NOT NULL, vix_change REAL
-                    )""",
-                ]:
-                    try:
-                        conn.execute(migration)
-                    except Exception:
-                        pass
-                conn.commit()
-            finally:
-                conn.close()
-            return
-        except Exception as e:
-            print(f"  WARNING: PostgreSQL unavailable ({e})")
-            print("  Falling back to SQLite — session data won't persist to Supabase.")
-            _pg_available = False
-            # fall through to SQLite init below
-
-    # SQLite path — full schema creation
+    """Create all tables and run column migrations. Safe to call on every startup."""
     conn = _conn()
     try:
         conn.executescript("""
@@ -298,6 +210,7 @@ def store_decision(
     spread_at_entry: Optional[float] = None,
 ) -> int:
     """Log a decision row. Returns the row id."""
+    now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         cur = conn.execute(
             """
@@ -312,10 +225,20 @@ def store_decision(
                 date_str, ticker, slug, gap_bps, yes_bid, yes_ask, spread_bps,
                 entry_side, entry_price, position_size, decision,
                 expected_edge, book_depth, adj_wr, gfr_at_entry,
-                spread_at_entry, datetime.now(timezone.utc).isoformat(),
+                spread_at_entry, now,
             ),
         )
-        return cur.lastrowid
+        row_id = cur.lastrowid
+    _rest_insert("decisions", {
+        "date": date_str, "ticker": ticker, "slug": slug,
+        "gap_bps": gap_bps, "yes_bid": yes_bid, "yes_ask": yes_ask,
+        "spread_bps": spread_bps, "entry_side": entry_side, "entry_price": entry_price,
+        "position_size": position_size, "decision": decision,
+        "expected_edge": expected_edge, "book_depth": book_depth,
+        "adj_wr": adj_wr, "gfr_at_entry": gfr_at_entry,
+        "spread_at_entry": spread_at_entry, "created_at": now,
+    })
+    return row_id
 
 
 def get_decisions_by_date(date_str: str) -> list:
@@ -359,6 +282,7 @@ def store_outcome(
     exit_type='time_exit' — sold at CLOB market price.
     exit_type='stop_loss' — stop-loss triggered intraday.
     """
+    now = datetime.now(timezone.utc).isoformat()
     with _conn() as conn:
         cur = conn.execute(
             """
@@ -371,12 +295,18 @@ def store_outcome(
                 ticker,
                 resolved_yes,
                 pnl_usd,
-                datetime.now(timezone.utc).isoformat(),
+                now,
                 exit_price,
                 exit_type,
             ),
         )
-        return cur.lastrowid
+        row_id = cur.lastrowid
+    _rest_insert("outcomes", {
+        "decision_id": decision_id, "date": date_str, "ticker": ticker,
+        "resolved_yes": resolved_yes, "pnl_usd": pnl_usd,
+        "closed_at": now, "exit_price": exit_price, "exit_type": exit_type,
+    })
+    return row_id
 
 
 def get_outcomes_for_date(date_str: str) -> list:
@@ -623,6 +553,12 @@ def store_scan_log(
             (date_str, now, ticker, et_time, gap_bps, yes_ask, yes_bid,
              adj_wr, edge, gfr, gfr_velocity, settlement_p_win, signal, vix_change),
         )
+    _rest_insert("scan_log", {
+        "date": date_str, "scanned_at": now, "ticker": ticker, "et_time": et_time,
+        "gap_bps": gap_bps, "yes_ask": yes_ask, "yes_bid": yes_bid,
+        "adj_wr": adj_wr, "edge": edge, "gfr": gfr, "gfr_velocity": gfr_velocity,
+        "settlement_p_win": settlement_p_win, "signal": signal, "vix_change": vix_change,
+    })
 
 
 def get_scan_log(date_str: str) -> list[dict]:
