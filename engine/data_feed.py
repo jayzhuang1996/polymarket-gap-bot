@@ -176,7 +176,7 @@ async def stock_price_loop():
                     round(adj_wr * payout - entry_ask, 4)
                     if adj_wr is not None and entry_ask else None
                 )
-                signal       = _compute_signal(gap_bps, gfr, live_edge)
+                signal       = _compute_signal(display, gap_bps, gfr, live_edge)
                 gfr_velocity = gfr - state._gfr_snapshot.get(display, gfr)
 
                 # stock_pct_vs_prevclose: where stock is right now vs prev_close (in %)
