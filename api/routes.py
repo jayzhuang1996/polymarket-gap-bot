@@ -49,7 +49,8 @@ def api_decisions_today():
 
 @router.get("/api/open-positions")
 def api_open_positions():
-    return [dict(r) for r in get_unresolved_decisions()]
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return [dict(r) for r in get_unresolved_decisions() if dict(r).get("date") == today]
 
 
 @router.get("/api/paper-trades")
@@ -242,6 +243,60 @@ def api_health():
         "last_scan_ticker": last_ticker,
         "open_positions": len([r for r in get_unresolved_decisions()
                                if dict(r).get("date") == today]),
+    }
+
+
+@router.get("/api/test/supabase")
+def api_test_supabase():
+    """Probe the Supabase REST connection with a live insert + delete.
+
+    Call this after any deploy to confirm Supabase is receiving data.
+    Returns the exact HTTP status and body on failure so you can diagnose column/auth issues.
+    """
+    import os, requests as _req
+    from database.db import _SUPABASE_URL, _SUPABASE_KEY, _conn
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_ts = datetime.now(timezone.utc).isoformat()
+    test_ticker = "__supabase_probe__"
+
+    url = f"{_SUPABASE_URL}/rest/v1/scan_log"
+    headers = {
+        "apikey": _SUPABASE_KEY,
+        "Authorization": f"Bearer {_SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=ignore-duplicates,return=minimal",
+    }
+    payload = {
+        "date": today, "scanned_at": now_ts, "ticker": test_ticker,
+        "et_time": "00:00", "signal": "TEST",
+    }
+
+    try:
+        resp = _req.post(url, json=payload, headers=headers, timeout=10)
+        insert_ok  = resp.status_code in (200, 201)
+        insert_status = resp.status_code
+        insert_body   = resp.text[:500]
+    except Exception as e:
+        return {"passed": False, "stage": "insert", "error": str(e)}
+
+    # Cleanup — delete the probe row from Supabase
+    try:
+        _req.delete(
+            f"{_SUPABASE_URL}/rest/v1/scan_log?ticker=eq.{test_ticker}",
+            headers={**headers, "Prefer": "return=minimal"}, timeout=5,
+        )
+    except Exception:
+        pass
+
+    return {
+        "passed":        insert_ok,
+        "http_status":   insert_status,
+        "response_body": insert_body if not insert_ok else "(empty — success)",
+        "supabase_url":  _SUPABASE_URL,
+        "key_prefix":    _SUPABASE_KEY[:20] + "...",
+        "note":          "Supabase REST is working — live data will flow." if insert_ok
+                         else "INSERT FAILED — check response_body for column/auth details.",
     }
 
 

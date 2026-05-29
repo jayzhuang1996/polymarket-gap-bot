@@ -55,7 +55,7 @@ def _rest_insert_sync(table: str, row: dict) -> None:
             "apikey": _SUPABASE_KEY,
             "Authorization": f"Bearer {_SUPABASE_KEY}",
             "Content-Type": "application/json",
-            "Prefer": "return=minimal",
+            "Prefer": "resolution=ignore-duplicates,return=minimal",
         }
         resp = _req.post(url, json=row, headers=headers, timeout=10)
         if resp.status_code in (200, 201):
@@ -64,9 +64,11 @@ def _rest_insert_sync(table: str, row: dict) -> None:
         else:
             _rest_ok = False
             _rest_last_error = f"REST {table} HTTP {resp.status_code}: {resp.text[:200]}"
+            print(f"[supabase] REST insert FAIL — {table} HTTP {resp.status_code}: {resp.text[:300]}")
     except Exception as e:
         _rest_ok = False
         _rest_last_error = str(e)[:200]
+        print(f"[supabase] REST insert ERROR — {table}: {e}")
 
 
 def _rest_insert(table: str, row: dict) -> None:
