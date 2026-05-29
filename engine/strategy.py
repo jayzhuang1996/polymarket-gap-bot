@@ -241,7 +241,12 @@ def _check_entry(
         return None
 
     gap_bps = q.get("gap_bps") or 0
-    threshold_bps = round(TICKER_GAP_THRESHOLD.get(ticker, 0.005) * 10_000)
+    # Early window (9:35–10:05 ET): Polymarket repricing lag is largest — use flat
+    # 50 bps threshold for all tickers. After 10:05, beta-adjusted thresholds apply.
+    if (9, 35) <= (h, m) < (10, 5):
+        threshold_bps = 50
+    else:
+        threshold_bps = round(TICKER_GAP_THRESHOLD.get(ticker, 0.005) * 10_000)
     if abs(gap_bps) <= threshold_bps:
         return None
 
