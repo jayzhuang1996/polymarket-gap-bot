@@ -63,7 +63,7 @@ For every ticker (SPX, NVDA, TSLA, AAPL, AMZN, GOOGL, META, MSFT, NFLX):
 
 
 ╔══════════════════════════════════════════════════════════════════╗
-║  ENTRY DECISION (every 2 minutes, 9:35am → 12:00pm ET)          ║
+║  ENTRY DECISION (every 2 minutes, 9:35am → 14:00 ET)            ║
 ╚══════════════════════════════════════════════════════════════════╝
 
 Every 2 minutes, for each ticker:
@@ -87,8 +87,23 @@ Every 2 minutes, for each ticker:
 │     Gap too small? → STOP.
 │
 ├─ GATE 2: BEFORE ENTRY FREEZE?
-│     No new entries after 12:00pm ET.
-│     After noon → STOP checking entries.
+│     No new entries after 14:00 ET (2pm). Hard freeze.
+│     Applies to both standard and REVERSAL trades.
+│     After 14:00 → STOP checking entries.
+│
+├─ REVERSAL REDIRECT (checked before Gate 3 — bypass signal history)
+│     Condition: gap direction is UP AND GFR < −1.0
+│       (GFR < −1.0 = stock has crossed below yesterday's close — gap fully reversed)
+│     → Skip Gates 3–4. GFR crossing is its own trigger.
+│     → Route to _check_reversal_entry():
+│         Side: BUY NO (tagged "REVERSAL")
+│         NO ask must be $0.40–$0.70
+│         Spread cap: ≤10% (tighter — CLOB spreads widen in panic reversals)
+│         NO edge = rev_wr × 0.99 − no_ask ≥ max(12%, tiered floor)
+│         rev_wr from REVERSAL_NO_WR table (per-ticker, 338-event backtest)
+│     Data: 53.7% of gap-UP sessions see GFR < −1.0 at some point.
+│     Backtest edge: +14.8% across 338 events (range +4.1%–+15.7% by time window).
+│     NOT triggered on gap-DOWN days (those already buy NO via standard path).
 │
 ├─ GATE 3: INTRADAY SIGNAL?
 │     GO   → live edge ≥3% AND GFR not reversed
@@ -97,12 +112,13 @@ Every 2 minutes, for each ticker:
 │     SKIP  → edge negative
 │     FADE or SKIP → STOP this cycle, retry in 2 minutes.
 │
-├─ GATE 4: CONVICTION CHECK
-│     AMZN/TSLA YES trades → SPRT (Sequential Probability Ratio Test)
-│       Each GO signal multiplies LR by (p1/p0). Each non-GO by (1-p1)/(1-p0).
-│       LR ≥ 5.0 → evidence strong, ENTER. LR ≤ 0.2 → gap fading, ABORT for day.
-│       SPRT abort is permanent for the day — no retry.
-│     All other trades → 3-of-4: need 3+ GO signals in last 4 two-minute checks.
+├─ GATE 4: MODEL CONFIDENCE CHECK (v2 — replaces SPRT/3-of-4)
+│     Settlement model predicts P(YES settles) from live features.
+│     P(YES) ≥ 0.55 → direction = YES. P(YES) ≤ 0.45 → direction = NO.
+│     0.45 < P(YES) < 0.55 → model uncertain → STOP this cycle.
+│     No waiting for consecutive GO signals. Entry fires on the first tick the
+│     model has sufficient confidence and edge clears the floor.
+│     Tagged "MODEL" in DB. Reversal path (gfr < −1.0) tagged "REVERSAL".
 │
 ├─ GATE 5: GFR ENTRY GATE FOR NO TRADES
 │     NO trades bet the gap reverses. Enter while gap is still intact.
@@ -110,16 +126,27 @@ Every 2 minutes, for each ticker:
 │     Historical data: filtered WR = 83.6% (n=128) vs 60.9% when GFR already < −0.3.
 │
 ├─ GATE 6: EDGE AND VIX REGIME
-│     adj_wr = base_wr + 0.15 × GFR × direction_sign  [real-time GFR adjustment]
-│     edge = adj_wr × 0.99 − current_ask_price
+│     live_edge = settlement_p_win × 0.99 − current_ask_price  (YES trade)
+│             or  (1 − settlement_p_win) × 0.99 − current_ask_price  (NO trade)
 │     [0.99 accounts for Polymarket's 1% settlement fee]
+│     Fallback: adj_wr (Bayesian blend + GFR adjustment) used when model unavailable.
 │
-│     Minimum edge required:
-│       Thursday or Friday              → ≥10% (historically weaker for gap bets)
-│       After 10:30am                   → ≥8%  (less ladder time)
+│     Edge floor (Thursday overrides all tiers):
+│       Thursday / Friday        → ≥10% flat (regardless of time)
+│       9:35–10:30 ET (other)    → ≥5%
+│       10:30–12:00 ET (other)   → ≥8%
+│       12:00–13:30 ET (other)   → ≥15%
+│       13:30–14:00 ET (other)   → ≥20%
+│       14:00+                   → FROZEN — no new entries
+│     Thursday floor note: `_entry_edge_min()` returns 10% before checking tiers.
+│     A 7% edge that would enter on Monday will not enter on Thursday.
+│     REVERSAL trades use max(12%, current floor) as their floor (12% usually wins).
+│
+│     VIX adjustments applied on top of floor:
 │       VIX in bullish zone [−2, −0.5] → subtract 2% from threshold
 │       VIX rising (>+0.5), YES trade  → add 3% to threshold
-│       Standard (before 10:30am)      → ≥3%
+│     VIX re-fetched every 30 minutes during market hours (refreshed every 15 × 2-min ticks,
+│     not only at open). Catches mid-morning VIX spikes that change the risk regime.
 │
 ├─ GATE 7: PRICE AND SPREAD
 │     Token price: $0.40–$0.70.
@@ -262,20 +289,21 @@ Why it persists: Polymarket's CLOB has no algorithmic market maker that reprices
 | MSFT | 1.1 | 0.55% |
 | NFLX | — | 1.50% (data-driven override) |
 
-### Conviction system
+### Entry conviction system (v2 — 2026-05-29)
 
-**3-of-4 (all NO trades, most YES trades):** 3+ of last 4 two-minute checks must show GO.
+**Model-driven direction (all trades):** Settlement model predicts P(YES settles). Direction is from the model, not hardcoded from overnight gap. Entry fires the first tick model confidence clears the threshold.
 
-**SPRT (AMZN/TSLA YES only):**
+| P(YES) | Action |
+|--------|--------|
+| ≥ 0.55 | BUY YES — model says YES token is underpriced |
+| ≤ 0.45 | BUY NO — model says NO token is underpriced |
+| 0.45–0.55 | Skip — model not confident |
 
-| Ticker | p1 (GO in winning trades) | p0 (GO in losing trades) | Enter at LR | Abort at LR |
-|--------|--------------------------|--------------------------|-------------|-------------|
-| AMZN | 0.43 | 0.28 | ≥5.0 | ≤0.2 |
-| TSLA | 0.26 | 0.19 | ≥5.0 | ≤0.2 |
+SPRT and 3-of-4 signal accumulation removed. The settlement model replaces the waiting period by providing real-time, calibrated probability instead of a binary GO signal count.
 
 ### VIX regime adjustment
 
-`vix_change = today's VIX open − yesterday's VIX close` (fetched once at startup)
+`vix_change = today's VIX open − yesterday's VIX close` (re-fetched every 30 minutes during market hours — not only at open)
 
 - `vix_change ∈ [−2.0, −0.5]` → subtract 2% from required edge for YES (88.4% historical WR zone, n=95)
 - `vix_change > +0.5` → add 3% to required edge for YES entries
@@ -335,7 +363,10 @@ Win rates are Bayesian blends in `database/wr_store.py`:
 - **daily_wr:** Computed from `scraped_observations` (1,355 resolved Polymarket markets, Oct 2025–present). Rebuilt nightly by `daily_update()`.
 - **Blend:** `adj_wr = (isolated_prior × 50 + daily_wr × N) / (50 + N)`
   - MIN_OBS_FOR_DB_WR = 30: daily_wr ignored entirely if fewer than 30 observations exist for that (ticker, direction) pair.
-- **Real-time adjustment:** `adj_wr += 0.15 × gfr × direction_sign`
+- **Real-time adjustment:** Two-slope formula keyed on `gfr × direction_sign`:
+  - Above −1.0: `adj += BAYES_LAMBDA (0.15) × signed_gfr`
+  - Below −1.0: `adj += BAYES_LAMBDA × (−1.0) + BAYES_STEEP_LAMBDA (0.35) × (signed_gfr + 1.0)`
+  The kink at −1.0 prevents the formula from assigning unrealistically high adj_wr (≈63%) when the stock has already crossed prev_close.
 
 Three model inputs stored at every entry (Risk 2 fix, May 2026): `adj_wr`, `gfr_at_entry`, `spread_at_entry`. This lets us audit post-session whether the edge estimate was accurate.
 
@@ -366,13 +397,16 @@ As of May 2026: 27/36 cells have insufficient OOS data (<5 obs). The 4 cells wit
 | **LR (Likelihood Ratio)** | The running SPRT score. Starts at 1.0, multiplies up on GO signals, down on non-GO. | AMZN p1=0.43, p0=0.28. Each GO multiplies by 1.54. Four consecutive GOs: 1.54^4 = 5.6 → enter. |
 | **Quarter-Kelly** | 25% of the theoretically optimal bet size. Full Kelly is optimal long-run but causes brutal drawdowns. | Full Kelly says bet $400. Quarter-Kelly → $100 max. |
 | **CI lower bound** | 90% confidence interval lower bound of win rate, used for sizing. Thin data means smaller bets automatically. | 20 obs at 70% WR → lower bound ~54% → $22 position. After 200 obs the bound tightens to 64% → $68. |
-| **AUC-ROC** | How often the model ranks a winning trade above a losing one. 0.5=coin flip, 1.0=perfect. Current: 0.8095. | Given NVDA (will win) and AAPL (will lose) both in-flight, model assigns NVDA higher P(win) 81% of the time. |
+| **AUC-ROC** | How often the model ranks a winning trade above a losing one. 0.5=coin flip, 1.0=perfect. v2 model: 0.70 OOS (vs old: 0.47 on same holdout). | Given NVDA (will win) and AAPL (will lose) both in-flight, model assigns NVDA higher P(win) 70% of the time. |
 | **Brier Score** | Mean squared error of probability estimates. 0.25=random, 0=perfect. Current: 0.1654. | Model says 70% P(win). Trade wins → Brier contribution = (0.70-1)^2 = 0.09. Averaged across all trades. |
 | **CLOB** | Polymarket's order book. You place limit orders; they fill when a counterparty takes the other side. Thin book, retail-driven. | You submit "BUY 50 YES @ 0.52". Sits in book until someone sells at <=0.52. May not fill for minutes. |
 | **VIX** | The S&P 500 fear index. Rising VIX = fear. Bot tightens entry thresholds on rising-VIX mornings. | VIX jumped +3 overnight. Required edge increases 5% → 8%. NVDA's 6.2% edge now fails the gate. |
 | **tbf_min** | Minutes before 4pm ET close. 390=9:30am open, 120=2pm, 0=close. Feature in settlement model and exit ladder. | Trade entered at 10am: tbf_min=360. By 2pm: tbf_min=120. Model penalises low-tbf — little time to recover. |
 | **live_edge** | Expected profit per dollar risked = `adj_wr × 0.99 - ask_price`. The 0.99 accounts for the 1% Polymarket fee. | adj_wr=0.69, ask=0.52 → live_edge = 0.69×0.99 - 0.52 = +0.163. You expect 16.3c profit per 52c risked. |
 | **3-of-4 conviction** | Entry requires GO signal in >=3 of last 4 two-minute checks. Filters single noisy ticks. | Checks: GO, no-GO, GO, GO → 3/4 = enter. Checks: GO, no-GO, no-GO, GO → 2/4 = wait. |
+| **REVERSAL trade** | BUY NO on a gap-UP day when the stock crosses below yesterday's close (GFR < −1.0). Bypasses signal history — the GFR crossing is the trigger. Calibrated via 338-event backtest. | NVDA gapped up 1.2%, but by 11am is below yesterday's close (GFR = −1.3). Reversal path fires: BUY NO at 51¢, expected +14.8% edge. |
+| **REVERSAL_NO_WR** | Per-ticker NO win rate at the GFR < −1.0 crossing, calibrated from 338 historical events. Used as rev_wr in reversal edge calculation. Replaces adj_wr for this path. | NVDA historical: 84.8% NO win rate when GFR first crosses −1.0 on a gap-UP day. At a 51¢ NO ask: edge = 0.848 × 0.99 − 0.51 = +0.33 = +33%. |
+| **fast-entry (FAST tag)** | Enters after 2 consecutive GO signals if live_edge ≥ 20%, bypassing the normal 3-of-4 wait. Captured in DB as tag="FAST". | Normal 3-of-4 would require 2 more checks (4 min). FAST fires now. Useful when edge is very high and the window is closing. |
 
 ---
 
@@ -382,10 +416,11 @@ As of May 2026: 27/36 cells have insufficient OOS data (<5 obs). The 4 cells wit
 |----------|------|--------------|
 | `load_base_wr(ticker, gap_up)` | `database/wr_store.py` | Returns `(adj_wr, prior_wr, n_obs)`. Bayesian blend of 5-year prior + live Polymarket WR. Called at every trading decision. |
 | `compute_position_size(win_rate, entry_price, n_obs)` | `engine/sizer.py` | Quarter-Kelly with 90% CI lower bound. Returns dollar size to buy, or 0.0 to skip. |
-| `predict(gfr, gfr_velocity, tbf_min, ...)` | `engine/settlement_model.py` | Logistic regression returning `(p_win, live_edge)`. Used to trigger mid-session exits. AUC 0.8095. |
+| `predict(stock_pct_vs_prevclose, momentum_30min, tbf_min, ...)` | `engine/settlement_model.py` | Logistic regression returning `(p_yes, live_edge_yes)`. Drives entry direction and mid-session exits. AUC 0.70 OOS. |
 | `reconcile_session_state()` | `engine/session.py` | On server restart, reads today's unresolved DB decisions and rehydrates in-memory position state. Prevents double-entry after a crash. |
 | `daily_update()` | `database/wr_store.py` | Recomputes `daily_wr` from all scraped_observations to date. Runs nightly via EOD pipeline. |
 | `_compute_signal(...)` | `engine/strategy.py` | Runs all 8 entry gates and returns GO / WATCH / FADE / SKIP. The brain of the entry decision. |
+| `_check_reversal_entry(ticker, q, h, m)` | `engine/strategy.py` | Called when gap-UP + GFR < −1.0. Validates NO ask, spread, and edge vs REVERSAL_NO_WR table. Returns entry dict tagged "REVERSAL" or None. |
 | `calc_gaps()` | `engine/data_feed.py` | Fetches yfinance OHLC, computes `(gap_bps, today_open, prev_close)` per ticker. Called once at startup. |
 | `discover_markets()` | `engine/data_feed.py` | Queries Polymarket Gamma API to find today's YES/NO token IDs for all 9 tickers. |
 | `backfill_gfr(df, ticker, td_df, daily)` | `tools/backfill_gfr_twelvedata.py` | Fills null GFR values in `full_session_2min.csv` using Twelve Data 5-min bars. Run once to patch historical dark period (Oct 2025–Feb 2026). |

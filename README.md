@@ -51,7 +51,8 @@ server.py                      ← FastAPI entrypoint + startup wiring
 │   ├── calibrate_exit_model.py    ← Rebuild exit model calibration table
 │   ├── train_settlement_model.py  ← Retrain logistic regression
 │   ├── scrape_history.py      ← Backfill Polymarket trade history
-│   └── oos_validation.py      ← Out-of-sample edge validation (run monthly)
+│   ├── oos_validation.py      ← Out-of-sample edge validation (run monthly)
+│   └── reversal_analysis.py   ← GFR < −1.0 reversal edge analysis (research, one-time)
 │
 ├── config.py                  ← All constants (thresholds, sizing, VIX, SPRT, Kelly)
 ├── railway.toml               ← Railway deploy config (start command + restart policy)
@@ -81,13 +82,19 @@ server.py                      ← FastAPI entrypoint + startup wiring
                            ↓
          ┌─── 2-minute trading loop ──────────────────────────────────┐
          │                                                             │
-         │  Entry (8 gates): gap threshold → GFR signal → SPRT       │
-         │    conviction → price band → edge → spread → VIX regime    │
-         │    → Kelly size → write to Supabase decisions              │
+         │  Entry (v2): gap threshold (per-ticker) →                  │
+         │    settlement model P(YES) ≥ 0.55 → YES                   │
+         │    settlement model P(YES) ≤ 0.45 → NO                    │
+         │    dead-zone 0.45–0.55 → skip                             │
+         │    → live edge ≥ time-based floor → price/spread → Kelly  │
+         │  Reversal path: gap-UP AND GFR < −1.0 → BUY NO            │
+         │    (bypasses model; GFR crossing is its own trigger)       │
          │                                                             │
          │  Exit (7 levels): time exits (2pm/2:30pm/3pm) →           │
-         │    GFR reversal (YES only) → NO profit lock + trail →      │
-         │    settlement P(win) → write to Supabase outcomes          │
+         │    GFR reversal (YES only, gfr < −0.5) →                  │
+         │    NO profit lock + trail stop →                           │
+         │    settlement P(win) per-side →                            │
+         │    write to Supabase outcomes                              │
          └─────────────────────────────────────────────────────────────┘
                            ↓ 4:20pm ET (Railway cron)
          eod_update.py: scrape outcomes → scraped_observations → daily_wr
@@ -104,13 +111,13 @@ server.py                      ← FastAPI entrypoint + startup wiring
 |-----------|-------|-------|
 | Tickers | 9 (SPX, NVDA, TSLA, AAPL, AMZN, GOOGL, META, MSFT, NFLX) | |
 | Gap threshold | Beta-scaled: 0.50% (SPX) → 1.50% (NFLX) | `TICKER_GAP_THRESHOLD` |
-| Entry window | 9:35am – 12:00pm ET | Hard freeze at noon |
-| Min edge | 5% standard / 8% after 10:30am / 10% Thursday | Dynamic per regime |
-| Position sizing | Quarter-Kelly on 90% CI lower bound | Max $100, 6 positions max |
+| Entry window | 9:35am – 14:00 ET | Tiered floors; hard freeze at 2pm |
+| Min edge | **Thu/Fri: 10% flat** · Mon–Wed tiered: 5% (9:35–10:30) / 8% (10:30–12:00) / 15% (12:00–13:30) / 20% (13:30–14:00) | Hard freeze at 14:00 |
+| Position sizing | Quarter-Kelly using settlement_p_win | Max $100, 6 positions max |
+| Entry direction | Settlement model: P(YES) ≥ 0.55 → YES; ≤ 0.45 → NO | Model-driven, not hardcoded |
 | GFR exit (YES) | −0.5 → sell 100% | Disabled for NO trades |
 | Time exits | 2:00pm / 2:30pm / 3:00pm ET | Tiered; 3pm is hard |
 | PRIOR_WEIGHT | 50 virtual obs | Bayesian weight on 5-year OHLC-derived priors |
-| SPRT | AMZN + TSLA YES only | LR ≥ 5.0 enter, ≤ 0.2 abort |
 
 ---
 
@@ -120,17 +127,20 @@ Bayesian blend in `database/wr_store.py`:
 - **Prior:** 5-year daily OHLC → empirical gap-direction close WR per ticker. Worth 50 virtual observations.
 - **Live:** Each resolved Polymarket market appended nightly by `eod_update.py` (Railway cron).
 - **Blend:** `adj_wr = (prior_wr × 50 + live_wr × N) / (50 + N)`. With N < 30, prior dominates.
-- **Intraday:** `adj_wr += 0.15 × gfr × direction_sign` (real-time GFR adjustment every 5s)
+- **Intraday:** Two-slope GFR adjustment — `+0.15/unit` while GFR×direction > −1.0 (shallow); `+0.35/unit` once GFR×direction < −1.0 (steep). Prevents adj_wr from being inflated when the stock has already crossed prev_close.
 
 ---
 
-## Settlement Model
+## Settlement Model (v2 — retrained 2026-05-29)
 
-Logistic regression predicting P(trade wins) at any intraday moment.
+Logistic regression predicting P(YES settles) at any intraday moment.
 
-- **Features:** `gfr`, `gfr_velocity`, `log(time_before_close)`, `abs(gap_pct)`, `market_p_win`, `dow_thu`, `vix_high`
-- **Exit triggers:** P(win) < 45% → sell 100%; live_edge < 0 → sell 80%
-- **AUC:** 0.8095 | **Brier:** 0.1654 | **Trained on:** 57,313 rows
+- **Features:** `stock_pct_vs_prevclose`, `momentum_30min`, `log(time_before_close)`, `yes_vwap`, `dow_thu`
+- **`stock_pct_vs_prevclose`** = gap_pct_fraction × 100 × (1 + gfr) — where stock is vs prev_close right now (%)
+- **`momentum_30min`** = change in stock_pct_vs_prevclose over last 30 min — trending toward or away from prev_close
+- **Direction:** P(YES) ≥ 0.55 → BUY YES; P(YES) ≤ 0.45 → BUY NO
+- **Exit:** YES exits when P(YES) < 0.45; NO exits when P(YES) > 0.55
+- **AUC:** 0.70 out-of-sample (vs old model: 0.47 on same holdout) | **Trained on:** 66,533 rows
 
 ---
 
@@ -139,8 +149,9 @@ Logistic regression predicting P(trade wins) at any intraday moment.
 | Component | Status |
 |-----------|--------|
 | Data pipeline (1,355 Polymarket obs, Oct 2025–present) | Done |
-| 8-gate entry + SPRT (AMZN/TSLA) | Done |
-| VIX regime filter | Done |
+| 8-gate entry + SPRT (AMZN/TSLA) + fast-entry path | Done |
+| Intraday reversal NO trades (GFR < −1.0 trigger, +14.8% historical edge) | Done |
+| VIX regime filter (30-min refresh during market hours) | Done |
 | GFR-based exit ladder (direction-asymmetric) | Done |
 | NO trade protection (profit lock + trailing stop) | Done |
 | Settlement model (AUC 0.8095, Brier 0.1654) | Done |

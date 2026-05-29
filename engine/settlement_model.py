@@ -1,22 +1,20 @@
-"""
-Settlement probability model — runtime inference.
+"""Settlement probability model — runtime inference.
 
 Loads the logistic regression bundle from data/settlement_model.pkl and
 provides predict() for use in the trading session loop.
 
-Features (must match tools/train_settlement_model.py):
-    gfr           gap fill ratio, clipped [-3, 3]
-    gfr_velocity  2-min change in gfr, clipped [-1, 1]
-    log_tbf       log1p(tbf_min)
-    gap_abs       abs(gap_pct), clipped at 0.15
-    market_p_win  P(our trade wins) per the market: yes_vwap if gap_up else 1-yes_vwap
-    dow_thu       1 if Thursday
-    vix_high      1 if VIX > 20 today (passed from session-start VIX fetch)
+Features (must match tools/train_settlement_model.py / retraining script):
+    stock_pos   stock_pct_vs_prevclose: (current_price - prev_close) / prev_close * 100
+                = gap_pct_pct * (1 + gfr).  Positive = stock above prev_close.
+    momentum    Change in stock_pos over the last 30 min (15 × 2-min ticks).
+    log_tbf     log1p(tbf_min)
+    yes_vwap    Current YES token VWAP — market's P(YES) estimate.
+    dow_thu     1 if Thursday
 
 Output:
-    p_win     — model's P(trade wins), range [0, 1]
-    live_edge — p_win * 0.99 - current_token_bid
-                Positive = still has edge; negative = edge gone, consider exiting.
+    p_yes       P(YES settles) — range [0, 1].
+    live_edge   Caller computes: p_yes * 0.99 - yes_ask  (YES trade)
+                                 (1-p_yes) * 0.99 - no_ask  (NO trade)
 """
 
 from __future__ import annotations
@@ -31,12 +29,8 @@ _MODEL_PATH = Path("data/settlement_model.pkl")
 _bundle: Optional[dict] = None
 _load_attempted = False
 
-_FEATURE_ORDER = [
-    "gfr", "gfr_velocity", "log_tbf", "gap_abs",
-    "market_p_win", "dow_thu", "vix_high",
-]
-
-_PAYOUT = 0.99  # 1% Polymarket fee
+_FEATURE_ORDER = ["stock_pos", "momentum", "log_tbf", "yes_vwap", "dow_thu"]
+_PAYOUT = 0.99
 
 
 def _load() -> bool:
@@ -47,8 +41,13 @@ def _load() -> bool:
     try:
         with open(_MODEL_PATH, "rb") as f:
             _bundle = pickle.load(f)
+        # Validate bundle has expected features
+        if _bundle.get("feature_names") != _FEATURE_ORDER:
+            print(f"[settlement_model] WARNING: bundle features {_bundle.get('feature_names')} "
+                  f"!= expected {_FEATURE_ORDER} — predictions may be wrong")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[settlement_model] failed to load: {e}")
         return False
 
 
@@ -57,62 +56,54 @@ def is_available() -> bool:
 
 
 def predict(
-    gfr: float,
-    gfr_velocity: float,
+    stock_pct_vs_prevclose: float,
+    momentum_30min: float,
     tbf_min: float,
-    gap_pct: float,
     yes_vwap: float,
     dow: str,
-    vix_high: bool,
     current_token_bid: float,
+    **_kwargs,  # absorb legacy keyword args from old callers
 ) -> tuple[float, float]:
-    """Return (p_win, live_edge) for the current position.
+    """Return (p_yes, live_edge_for_yes_token).
 
     Args:
-        gfr:               Gap fill ratio (server.py computes this every 5s).
-        gfr_velocity:      Change in gfr since 2 minutes ago.
-        tbf_min:           Minutes before market expiry (390 at open, 2 at close).
-        gap_pct:           Overnight gap as fraction: (open-prev_close)/prev_close.
-                           Positive = gap up, negative = gap down.
-        yes_vwap:          Current YES token VWAP (best proxy for token fair value).
-        dow:               Day-of-week abbreviation: "Mon"/"Tue"/"Wed"/"Thu"/"Fri".
-        vix_high:          True if VIX > 20 today (fetched once at session start).
-        current_token_bid: Bid price of the token we hold (YES bid if gap_up, NO bid
-                           if gap_down). Used to compute live_edge.
+        stock_pct_vs_prevclose: (current_price - prev_close) / prev_close * 100.
+            Positive = stock above yesterday's close.
+            Computed live as: gap_pct_fraction * 100 * (1 + gfr).
+        momentum_30min: change in stock_pct_vs_prevclose over last 30 min.
+            Positive = stock moving further above prev_close.
+        tbf_min:  Minutes before market expiry (390 at open, 2 at close).
+        yes_vwap: Current YES token VWAP — market's best estimate of P(YES).
+        dow:      Day-of-week abbreviation: "Mon"/"Tue"/"Wed"/"Thu"/"Fri".
+        current_token_bid: Bid price of the YES token (used to compute live_edge).
 
     Returns:
-        p_win     — model probability our trade wins (0.0–1.0).
-        live_edge — p_win * 0.99 − current_token_bid.
-                    > 0.05: hold, edge intact.
-                    0–0.05: watch, edge thin.
-                    < 0: exit, market priced past our estimate.
+        p_yes     — P(YES settles), range [0.01, 0.99].
+        live_edge — p_yes * 0.99 - current_token_bid.
+                    Use this for YES trade edge only.
+                    For NO trade edge: compute (1 - p_yes) * 0.99 - no_bid in caller.
     """
     if not _load():
-        # Model file missing — return neutral estimate based on market price
-        p_win = yes_vwap if gap_pct > 0 else (1.0 - yes_vwap)
-        return round(p_win, 4), round(p_win * _PAYOUT - current_token_bid, 4)
-
-    gap_up       = gap_pct > 0
-    market_p_win = yes_vwap if gap_up else (1.0 - yes_vwap)
+        # No model file — fall back to market estimate
+        p_yes = float(np.clip(yes_vwap, 0.01, 0.99))
+        return p_yes, round(p_yes * _PAYOUT - current_token_bid, 4)
 
     row = np.array([[
-        float(np.clip(gfr,          -3.0, 3.0)),
-        float(np.clip(gfr_velocity, -1.0, 1.0)),
+        float(np.clip(stock_pct_vs_prevclose, -15.0, 15.0)),
+        float(np.clip(momentum_30min,         -10.0, 10.0)),
         float(np.log1p(max(tbf_min, 0))),
-        float(np.clip(abs(gap_pct),  0.0, 5.0)),
-        float(np.clip(market_p_win,  0.0, 1.0)),
+        float(np.clip(yes_vwap,                0.0,  1.0)),
         float(dow == "Thu"),
-        float(vix_high),
     ]])
 
     scaler = _bundle["scaler"]
     model  = _bundle["model"]
     X_s    = scaler.transform(row)
-    p_win  = float(model.predict_proba(X_s)[0, 1])
-    p_win  = float(np.clip(p_win, 0.01, 0.99))
+    p_yes  = float(model.predict_proba(X_s)[0, 1])
+    p_yes  = float(np.clip(p_yes, 0.01, 0.99))
 
-    live_edge = round(p_win * _PAYOUT - current_token_bid, 4)
-    return round(p_win, 4), live_edge
+    live_edge = round(p_yes * _PAYOUT - current_token_bid, 4)
+    return round(p_yes, 4), live_edge
 
 
 def reload() -> bool:

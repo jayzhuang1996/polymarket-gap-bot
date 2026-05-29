@@ -36,6 +36,10 @@ _no_token_peak: dict[str, float] = {}
 _decision_ids: dict[str, int] = {}
 _realized_pnl: dict[str, float] = {}
 
+# Rolling stock_pos history for momentum calculation (15 × 2-min ticks = 30 min).
+# Populated by data_feed.stock_price_loop(); reset by session.py daily reset.
+_stock_pos_history: dict[str, list[float]] = {}
+
 # VIX snapshot — fetched once at session start, held constant for the day.
 # Must be reassigned via ``state._vix_change = x`` (not via local rebinding).
 _vix_change: float | None = None

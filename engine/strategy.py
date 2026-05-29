@@ -2,6 +2,14 @@
 
 Pure-ish functions: they read session state from engine.state but contain
 no I/O (no network calls, no DB writes) other than the VIX yfinance fetch.
+
+Algorithm v2 changes:
+  - Entry direction driven by settlement model P(YES), not hardcoded from gap direction.
+  - Entry gate: model confidence ≥ SETTLEMENT_YES_THRESHOLD + live edge ≥ floor.
+    SPRT and 3-of-4 signal accumulation removed.
+  - Gap threshold per ticker via TICKER_GAP_THRESHOLD (replaces hardcoded 50 bps).
+  - Exit: settlement_urgent now fires per-side (YES exits when p_yes < 0.45;
+    NO exits when p_yes > 0.55).
 """
 
 import datetime as _dt
@@ -10,8 +18,9 @@ import yfinance as yf
 
 import engine.state as state
 from config import (
-    TRADING_FEE_PCT, BAYES_LAMBDA,
-    SPRT_YES_PARAMS, SPRT_ENTER_LR, SPRT_ABORT_LR,
+    TRADING_FEE_PCT, BAYES_LAMBDA, BAYES_STEEP_LAMBDA,
+    SETTLEMENT_YES_THRESHOLD,
+    TICKER_GAP_THRESHOLD,
     VIX_HIGH_THRESHOLD,
     VIX_CHANGE_BULLISH_LO, VIX_CHANGE_BULLISH_HI,
     VIX_CHANGE_BEARISH_MIN, VIX_BULLISH_EDGE_DISCOUNT, VIX_BEARISH_EDGE_PENALTY,
@@ -25,16 +34,15 @@ from config import (
 )
 
 # ── Session constants ──────────────────────────────────────────────────────────
-ENTRY_CONFIRMATIONS_NEEDED = 3
-FAST_ENTRY_EDGE_MIN        = 0.20   # bypass 3-of-4: enter after 2 consecutive GOs if edge ≥ 20%
 LATE_ENTRY_HOUR_CUTOFF     = (10, 30)
-TIER1_ENTRY_HOUR_CUTOFF    = (12, 0)   # 12:00–13:30 → edge floor 15%
-TIER2_ENTRY_HOUR_CUTOFF    = (13, 30)  # 13:30–14:00 → edge floor 20%
-ENTRY_FREEZE_HOUR          = (14, 0)   # 14:00 → hard freeze
+TIER1_ENTRY_HOUR_CUTOFF    = (12, 0)    # 12:00–13:30 → edge floor 15%
+TIER2_ENTRY_HOUR_CUTOFF    = (13, 30)   # 13:30–14:00 → edge floor 20%
+ENTRY_FREEZE_HOUR          = (14, 0)    # 14:00 → hard freeze
 HARD_EXIT_ET               = (15, 0)
-ET_OFFSET_H                = -4        # EDT (Mar–Nov)
+ET_OFFSET_H                = -4         # EDT (Mar–Nov)
 GFR_COOLDOWN_MINUTES       = 30
 FULLY_EXITED_THRESHOLD     = 0.05
+ENTRY_CONFIRMATIONS_NEEDED = 3          # kept for session.py reprice signal_ok check
 
 
 # ── Time helpers ───────────────────────────────────────────────────────────────
@@ -153,11 +161,14 @@ def _est_edge(
 
 
 def _compute_signal(
+    ticker: str,
     gap_bps: int | None,
     gfr: float | None,
     live_edge: float | None,
 ) -> str:
-    if not gap_bps or abs(gap_bps) <= 50:
+    """Compute the per-tick signal. Uses per-ticker gap threshold from config."""
+    threshold_bps = round(TICKER_GAP_THRESHOLD.get(ticker, 0.005) * 10_000)
+    if not gap_bps or abs(gap_bps) <= threshold_bps:
         return "FLAT"
     if gfr is not None and gfr < -0.3:
         return "FADE"
@@ -175,9 +186,8 @@ def _compute_signal(
 def _check_reversal_entry(ticker: str, q: dict, h: int, m: int) -> dict | None:
     """NO entry when a gap-UP day fully reverses (GFR < -1.0).
 
-    Called from _check_entry when gap_bps > 50 and gfr < -1.0.
-    Uses per-ticker reversal win rates from the analysis (tools/reversal_analysis.py)
-    rather than the cached no_wr (which is 1 − gap_up_yes_wr ≈ 0.17, meaningless here).
+    Called from _check_entry when gap_bps > threshold and gfr < -1.0.
+    Uses per-ticker reversal win rates rather than the cached no_wr.
     """
     if _entry_frozen(h, m):
         return None
@@ -205,8 +215,8 @@ def _check_reversal_entry(ticker: str, q: dict, h: int, m: int) -> dict | None:
         "entry_price": round(no_ask, 4),
         "live_edge":   live_edge,
         "adj_wr":      round(rev_wr, 4),
+        "settlement_p": None,
         "gap_bps":     q.get("gap_bps"),
-        "go_signals":  0,
         "tag":         "REVERSAL",
         "late":        _is_late_entry(h, m),
         "thursday":    _is_thursday(),
@@ -220,88 +230,109 @@ def _check_reversal_entry(ticker: str, q: dict, h: int, m: int) -> dict | None:
 def _check_entry(
     ticker: str, q: dict, h: int, m: int, reentry: bool = False
 ) -> dict | None:
-    """Return an entry signal dict if all conditions are met, else None."""
+    """Return an entry signal dict if all conditions are met, else None.
+
+    Direction is determined by the settlement model's P(YES):
+      - P(YES) ≥ SETTLEMENT_YES_THRESHOLD  → trade YES
+      - P(YES) ≤ 1 - SETTLEMENT_YES_THRESHOLD → trade NO
+      - Dead-zone in between → skip
+    No SPRT or 3-of-4 signal accumulation required.
+    """
     if not reentry and ticker in state._session_entered:
         return None
     if ticker in state._session_aborted:
         return None
+
     gap_bps = q.get("gap_bps") or 0
-    if abs(gap_bps) <= 50:
+    threshold_bps = round(TICKER_GAP_THRESHOLD.get(ticker, 0.005) * 10_000)
+    if abs(gap_bps) <= threshold_bps:
         return None
 
-    gap_up  = gap_bps > 0
-    gfr     = q.get("gfr")
+    gap_up = gap_bps > 0
+    gfr    = q.get("gfr")
 
-    # Reversal path: gap-UP day, stock has crossed prev_close.
-    # Bypasses signal-history checks — GFR crossing is its own trigger.
+    # Reversal path: gap-UP day, stock crossed prev_close.
     if gap_up and gfr is not None and gfr < -1.0:
         return _check_reversal_entry(ticker, q, h, m)
 
-    history = state._signal_history.get(ticker, [])
+    # ── Model-driven direction ─────────────────────────────────────────────
+    settlement_p = q.get("settlement_p_win")
+    if settlement_p is None:
+        # Model hasn't fired yet (first few ticks); fall back to gap direction
+        # with the Bayesian adj_wr as the win-rate estimate.
+        settlement_p = None
 
-    sprt_params = SPRT_YES_PARAMS.get(ticker) if gap_up else None
-    if sprt_params:
-        p1, p0 = sprt_params
-        lr = 1.0
-        for sig in history:
-            lr *= p1 / p0 if sig == "GO" else (1 - p1) / (1 - p0)
-        if lr <= SPRT_ABORT_LR:
-            state._session_aborted.add(ticker)
-            return None
-        if lr < SPRT_ENTER_LR:
-            return None
+    payout   = 1.0 - TRADING_FEE_PCT
+    edge_min = max(_entry_edge_min(h, m), 0.08 if reentry else 0.0)
+
+    # Determine side and compute live edge from model probability
+    if settlement_p is not None:
+        if settlement_p >= SETTLEMENT_YES_THRESHOLD:
+            side        = "YES"
+            entry_price = q.get("yes_ask")
+            if not entry_price:
+                return None
+            live_edge = round(settlement_p * payout - entry_price, 4)
+        elif settlement_p <= (1.0 - SETTLEMENT_YES_THRESHOLD):
+            side        = "NO"
+            entry_price = q.get("no_ask")
+            if not entry_price:
+                return None
+            live_edge = round((1.0 - settlement_p) * payout - entry_price, 4)
+        else:
+            return None  # model uncertain — skip
     else:
-        go_count       = sum(1 for s in history[-4:] if s == "GO")
-        consecutive_go = len(history) >= 2 and history[-1] == "GO" and history[-2] == "GO"
-        live_edge_now  = q.get("live_edge") or q.get("est_edge") or 0
-        fast_entry     = consecutive_go and live_edge_now >= FAST_ENTRY_EDGE_MIN
-        if not fast_entry and go_count < ENTRY_CONFIRMATIONS_NEEDED:
+        # Fallback: use gap direction + adj_wr (model not yet available)
+        adj_wr = q.get("adj_wr")
+        if adj_wr is None:
+            return None
+        side        = "YES" if gap_up else "NO"
+        entry_price = q.get("yes_ask") if side == "YES" else q.get("no_ask")
+        if not entry_price:
+            return None
+        live_edge = q.get("live_edge") or q.get("est_edge")
+        if live_edge is None:
             return None
 
-    # For NO trades: skip if stock has bounced above open (gap reversing).
-    if not gap_up and gfr is not None and gfr < GFR_NO_ENTRY_MIN:
+    # NO entry GFR gate: skip NO entry if stock bounced hard above prev_close
+    if side == "NO" and gfr is not None and gfr < GFR_NO_ENTRY_MIN:
         return None
 
-    edge_min   = max(_entry_edge_min(h, m),   0.08 if reentry else 0.0)
-    spread_max = min(_entry_spread_max(h, m), 10.0 if reentry else 999.0)
+    if live_edge < edge_min:
+        return None
 
-    if gap_up and state._vix_change is not None:
+    # Price sanity: token must be in tradeable range
+    if not entry_price or entry_price > 0.85 or entry_price < 0.40:
+        return None
+
+    spread     = q.get("yes_spread") if side == "YES" else q.get("no_spread")
+    spread_max = min(_entry_spread_max(h, m), 10.0 if reentry else 999.0)
+    if spread is None or spread > spread_max:
+        return None
+
+    # VIX adjustment (YES trades only)
+    if side == "YES" and state._vix_change is not None:
         if VIX_CHANGE_BULLISH_LO <= state._vix_change <= VIX_CHANGE_BULLISH_HI:
             edge_min = max(0.01, edge_min - VIX_BULLISH_EDGE_DISCOUNT)
         elif state._vix_change > VIX_CHANGE_BEARISH_MIN:
             edge_min += VIX_BEARISH_EDGE_PENALTY
+        if live_edge < edge_min:
+            return None
 
-    live_edge = q.get("live_edge") or q.get("est_edge")
-    if live_edge is None or live_edge < edge_min:
-        return None
+    adj_wr_for_db = (
+        round(settlement_p, 4) if settlement_p is not None
+        else (q.get("adj_wr") or 0.60)
+    )
 
-    side   = "YES" if gap_up else "NO"
-    spread = q.get("yes_spread") if side == "YES" else q.get("no_spread")
-    if spread is None or spread > spread_max:
-        return None
-
-    entry_price = q.get("yes_ask") if side == "YES" else q.get("no_ask")
-    if not entry_price or entry_price > 0.70 or entry_price < 0.40:
-        return None
-
-    adj_wr = q.get("adj_wr")
-    if sprt_params:
-        tag = "SPRT"
-    elif fast_entry:
-        tag = "FAST"           # 2 consecutive GOs + edge ≥ 20%
-    elif go_count >= 4:
-        tag = "CONFIRMED"      # 4 of last 4 GO
-    else:
-        tag = "EARLY"          # exactly 3 of last 4 GO (minimum)
     return {
         "ticker":      ticker,
         "side":        side,
         "entry_price": round(entry_price, 4),
         "live_edge":   round(live_edge, 4),
-        "adj_wr":      round(adj_wr, 4) if adj_wr else None,
+        "adj_wr":      adj_wr_for_db,
+        "settlement_p": settlement_p,
         "gap_bps":     gap_bps,
-        "go_signals":  go_count,
-        "tag":         tag,
+        "tag":         "MODEL" if settlement_p is not None else "FALLBACK",
         "late":        _is_late_entry(h, m),
         "thursday":    _is_thursday(),
         "vix_change":  state._vix_change,
@@ -335,7 +366,7 @@ def _check_exit(
         return {"reason": "hard_3pm", "fraction": 1.0,
                 "price": current_bid, "profit_pct": profit_pct}
 
-    # 2. GFR-based exits
+    # 2. GFR-based exits (YES only: calibrated WR 18% when gfr < -0.5)
     if gfr is not None:
         gfr_shallow = TICKER_GFR_EXIT_SHALLOW.get(ticker, -0.5)
         gfr_deep    = TICKER_GFR_EXIT_DEEP.get(ticker, -0.8)
@@ -359,18 +390,26 @@ def _check_exit(
             return {"reason": "no_trail_stop", "fraction": NO_TRAIL_STOP_FRAC,
                     "price": current_bid, "profit_pct": profit_pct}
 
-    # 4. Settlement model exits
+    # 4. Settlement model exits — per-side (v2: NO exit when p_yes > 0.55)
     s_p_win = q.get("settlement_p_win")
-    s_edge  = q.get("settlement_edge")
     if s_p_win is not None:
-        if s_p_win < 0.45 and "settlement_urgent" not in fired:
-            return {"reason": "settlement_urgent", "fraction": 1.0,
-                    "price": current_bid, "profit_pct": profit_pct}
-        if s_edge is not None and s_edge <= 0 and "settlement_edge_gone" not in fired:
+        if side == "YES":
+            s_edge = s_p_win * payout - current_bid
+            if s_p_win < 0.45 and "settlement_urgent" not in fired:
+                return {"reason": "settlement_urgent", "fraction": 1.0,
+                        "price": current_bid, "profit_pct": profit_pct}
+        else:  # side == "NO"
+            p_no   = 1.0 - s_p_win
+            s_edge = p_no * payout - current_bid
+            if s_p_win > 0.55 and "settlement_urgent" not in fired:
+                return {"reason": "settlement_urgent", "fraction": 1.0,
+                        "price": current_bid, "profit_pct": profit_pct}
+
+        if s_edge <= 0 and "settlement_edge_gone" not in fired:
             return {"reason": "settlement_edge_gone", "fraction": 0.80,
                     "price": current_bid, "profit_pct": profit_pct}
 
-    # 5. Edge-exhaustion profit lock (Bayesian WR path, no settlement model)
+    # 5. Edge-exhaustion profit lock (adj_wr fallback, no settlement model)
     if (s_p_win is None and adj_wr is not None and profit_pct >= 0.15
             and gfr is not None and gfr < 0 and "edge_exhausted" not in fired):
         if adj_wr * payout - current_bid <= 0:

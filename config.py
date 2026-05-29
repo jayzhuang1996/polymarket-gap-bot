@@ -232,26 +232,26 @@ CLOB_EXIT_DISCOUNT = 0.05
 STOP_LEVELS = [0.85, 0.70, 0.50]  # Sell if price drops to these levels
 
 # ============================================================================
-# SPRT ENTRY — YES trades only
+# SETTLEMENT MODEL ENTRY THRESHOLDS
 # ============================================================================
 
-# SPRT = Sequential Probability Ratio Test. Plain English: instead of waiting
-# for exactly 3-of-4 GO signals, SPRT accumulates evidence for or against the
-# gap holding. It can conclude "enter" early (strong evidence) or "abort"
-# (strong evidence the gap is fading — skip the ticker for the rest of the day).
-#
-# p1 = how often we see a GO signal when the trade ends up winning
-# p0 = how often we see a GO signal when the trade ends up losing
-# If p1 > p0, GO signals are genuinely informative. Only AMZN and TSLA qualify.
-# All other tickers and ALL NO trades fall back to the 3-of-4 heuristic.
-#
-# Source: tools/validate_gap_mispricing.py corrected YES/NO split analysis.
+# Direction gate: enter YES when model P(YES) ≥ this; enter NO when P(YES) ≤ 1 - this.
+# At 0.55, both YES and NO require the model to predict at least 55% probability.
+# The dead-zone 0.45–0.55 is skipped — model isn't confident enough to trade.
+SETTLEMENT_YES_THRESHOLD = 0.55
+
+# ============================================================================
+# SPRT ENTRY (retained for reference — no longer used in live strategy)
+# ============================================================================
+
+# Replaced by model-driven direction + settlement probability gate.
+# Kept here so any legacy code that imports these symbols doesn't break.
 SPRT_YES_PARAMS: dict[str, tuple[float, float]] = {
-    "AMZN": (0.430, 0.282),   # p1=0.43, p0=0.28 → LR ratio 1.53
-    "TSLA": (0.257, 0.194),   # p1=0.26, p0=0.19 → LR ratio 1.32
+    "AMZN": (0.430, 0.282),
+    "TSLA": (0.257, 0.194),
 }
-SPRT_ENTER_LR = 5.0    # enter when evidence is this strongly in favour
-SPRT_ABORT_LR = 0.2    # skip ticker today when evidence is this strongly against
+SPRT_ENTER_LR = 5.0
+SPRT_ABORT_LR = 0.2
 
 # ============================================================================
 # VIX REGIME

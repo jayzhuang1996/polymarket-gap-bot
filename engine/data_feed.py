@@ -175,6 +175,18 @@ async def stock_price_loop():
                 signal       = _compute_signal(gap_bps, gfr, live_edge)
                 gfr_velocity = gfr - state._gfr_snapshot.get(display, gfr)
 
+                # stock_pct_vs_prevclose: where stock is right now vs prev_close (in %)
+                # = gap_pct_fraction * 100 * (1 + gfr), same units as training data
+                gap_pct_frac    = (open_p - prev_p) / prev_p if prev_p else 0
+                stock_pos       = gap_pct_frac * 100.0 * (1.0 + gfr)
+
+                # 30-min momentum: rolling history of stock_pos per ticker (max 20 ticks)
+                hist = state._stock_pos_history.setdefault(display, [])
+                momentum_30min  = (stock_pos - hist[-15]) if len(hist) >= 15 else 0.0
+                hist.append(stock_pos)
+                if len(hist) > 20:
+                    hist.pop(0)
+
                 settlement_p_win = settlement_edge = None
                 if settlement_available():
                     tbf_min  = max(2, int(390 - (
@@ -183,29 +195,30 @@ async def stock_price_loop():
                         ET_OFFSET_H * 60 - 9 * 60 - 30
                     )))
                     tbf_min  = max(2, min(390, tbf_min))
-                    gap_pct  = (open_p - prev_p) / prev_p if prev_p else 0
                     yes_vwap = q.get("yes_ask") or 0.5
-                    token_bid = q.get("yes_bid") if (gap_bps or 0) > 50 else q.get("no_bid")
-                    if token_bid and yes_vwap:
-                        settlement_p_win, settlement_edge = settlement_predict(
-                            gfr=gfr, gfr_velocity=gfr_velocity,
-                            tbf_min=tbf_min, gap_pct=gap_pct,
-                            yes_vwap=yes_vwap, dow=datetime.now().strftime("%a"),
-                            vix_high=state._vix_high,
-                            current_token_bid=token_bid,
-                        )
+                    yes_bid  = q.get("yes_bid") or yes_vwap
+                    settlement_p_win, settlement_edge = settlement_predict(
+                        stock_pct_vs_prevclose=stock_pos,
+                        momentum_30min=momentum_30min,
+                        tbf_min=tbf_min,
+                        yes_vwap=yes_vwap,
+                        dow=datetime.now().strftime("%a"),
+                        current_token_bid=yes_bid,
+                    )
 
                 q.update({
-                    "current_price":    round(current_price, 2),
-                    "stock_move_pct":   round(stock_move_pct, 2),
-                    "current_gap_bps":  current_gap_bps,
-                    "gfr":              round(gfr, 3),
-                    "gfr_velocity":     round(gfr_velocity, 4),
-                    "adj_wr":           round(adj_wr, 4) if adj_wr is not None else None,
-                    "live_edge":        live_edge,
-                    "settlement_p_win": settlement_p_win,
-                    "settlement_edge":  settlement_edge,
-                    "signal":           signal,
+                    "current_price":          round(current_price, 2),
+                    "stock_move_pct":         round(stock_move_pct, 2),
+                    "current_gap_bps":        current_gap_bps,
+                    "gfr":                    round(gfr, 3),
+                    "gfr_velocity":           round(gfr_velocity, 4),
+                    "stock_pct_vs_prevclose": round(stock_pos, 4),
+                    "momentum_30min":         round(momentum_30min, 4),
+                    "adj_wr":                 round(adj_wr, 4) if adj_wr is not None else None,
+                    "live_edge":              live_edge,
+                    "settlement_p_win":       settlement_p_win,
+                    "settlement_edge":        settlement_edge,
+                    "signal":                 signal,
                 })
                 if live_edge is not None:
                     q["est_edge"] = live_edge

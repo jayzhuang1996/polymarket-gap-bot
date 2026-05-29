@@ -6,7 +6,7 @@ from datetime import datetime
 
 import engine.state as state
 from config import (
-    TICKERS, SPRT_YES_PARAMS, SPRT_ENTER_LR, SPRT_ABORT_LR,
+    TICKERS, SETTLEMENT_YES_THRESHOLD,
     MAX_REPRICE_ATTEMPTS, REPRICE_DRIFT_THRESHOLD,
 )
 from engine.sizer import compute_position_size
@@ -62,20 +62,10 @@ def get_session_state() -> dict:
     """Snapshot of all live session variables for the dashboard."""
     h, m = _et_now_hm()
 
-    sprt_state: dict[str, dict] = {}
-    for ticker, params in SPRT_YES_PARAMS.items():
-        history = state._signal_history.get(ticker, [])
-        p1, p0  = params
-        lr      = 1.0
-        for sig in history:
-            lr *= (p1 / p0) if sig == "GO" else ((1 - p1) / (1 - p0))
-        status = "ABORT" if lr <= SPRT_ABORT_LR else ("ENTER" if lr >= SPRT_ENTER_LR else "WATCH")
-        sprt_state[ticker] = {"lr": round(lr, 3), "status": status}
-
     now_dt    = datetime.now()
     cooldowns: dict[str, int] = {}
     for ticker, start in state._gfr_exit_cooldowns.items():
-        remaining        = max(0, GFR_COOLDOWN_MINUTES * 60 - (now_dt - start).total_seconds())
+        remaining         = max(0, GFR_COOLDOWN_MINUTES * 60 - (now_dt - start).total_seconds())
         cooldowns[ticker] = round(remaining)
 
     return {
@@ -89,7 +79,7 @@ def get_session_state() -> dict:
         "remaining_fractions": {k: round(v, 3) for k, v in state._remaining_fractions.items()},
         "exit_triggers_fired": {k: list(v) for k, v in state._exit_triggers_fired.items()},
         "no_peaks":            {k: round(v, 3) for k, v in state._no_token_peak.items()},
-        "sprt":                sprt_state,
+        "settlement_threshold": SETTLEMENT_YES_THRESHOLD,
         "edge_min":            round(_entry_edge_min(h, m), 3),
         "is_thursday":         _is_thursday(),
         "is_late_entry":       _is_late_entry(h, m),
@@ -129,6 +119,7 @@ async def trading_session_loop():
             state._remaining_fractions.clear()
             state._prev_gfr.clear()
             state._gfr_snapshot.clear()
+            state._stock_pos_history.clear()
             state._pending_orders.clear()
             state._held_contracts.clear()
             state._no_token_peak.clear()
@@ -187,12 +178,14 @@ async def trading_session_loop():
                     pticker_q     = state.current_quotes.get(pticker, {})
                     new_price     = (pticker_q.get("yes_ask") if pending["side"] == "YES"
                                      else pticker_q.get("no_ask"))
-                    signal_ok     = (
-                        not _entry_frozen(h, m) and
-                        pticker_q.get("signal") == "GO" and
-                        sum(1 for s in state._signal_history.get(pticker, [])[-4:]
-                            if s == "GO") >= ENTRY_CONFIRMATIONS_NEEDED
+                    # Reprice is valid if entry conditions still hold:
+                    # model confidence sufficient and entry not frozen.
+                    _sp = pticker_q.get("settlement_p_win")
+                    _model_ok = (
+                        _sp is not None and
+                        (_sp >= SETTLEMENT_YES_THRESHOLD or _sp <= (1.0 - SETTLEMENT_YES_THRESHOLD))
                     )
+                    signal_ok = not _entry_frozen(h, m) and _model_ok
                     price_ok      = new_price is not None and 0.40 <= new_price <= 0.70
                     attempts_left = reprice_count < MAX_REPRICE_ATTEMPTS
 
@@ -200,8 +193,8 @@ async def trading_session_loop():
                         drift         = abs(new_price - pending["price"])
                         drift_label   = (f"{pending['price']:.3f}→{new_price:.3f}"
                                          if drift > REPRICE_DRIFT_THRESHOLD else "stable")
-                        adj_wr        = pticker_q.get("adj_wr") or 0.60
-                        size_usd      = compute_position_size(adj_wr, new_price)
+                        _wr_for_size  = pticker_q.get("settlement_p_win") or pticker_q.get("adj_wr") or 0.60
+                        size_usd      = compute_position_size(_wr_for_size, new_price)
                         size_contracts = round(size_usd / new_price, 1)
                         new_id = await asyncio.to_thread(
                             state.order_manager.place_buy,
@@ -294,8 +287,11 @@ async def trading_session_loop():
                           f"  [{tag_str}]")
                     signals_this_cycle.append({"event": "entry_signal", **entry})
 
-                    _psize  = compute_position_size(entry.get("adj_wr") or 0.60, entry["entry_price"])
-                    _dec_id = store_decision(
+                    # Use settlement_p as win_rate for Kelly sizing when available;
+                    # fall back to adj_wr for the rare FALLBACK tag path.
+                    _win_rate = entry.get("settlement_p") or entry.get("adj_wr") or 0.60
+                    _psize    = compute_position_size(_win_rate, entry["entry_price"])
+                    _dec_id   = store_decision(
                         datetime.now().strftime("%Y-%m-%d"),
                         display,
                         f"BUY {entry['side']} [{tag_str.strip()}]",
