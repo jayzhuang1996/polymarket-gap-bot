@@ -287,18 +287,18 @@ def _sync_sqlite_to_supabase(d: date) -> None:
             return 0
 
     n_scan = _post_batch("scan_log", scan, [
-        "date", "scanned_at", "ticker", "et_time", "gap_bps",
+        "id", "date", "scanned_at", "ticker", "et_time", "gap_bps",
         "yes_ask", "yes_bid", "adj_wr", "edge", "gfr",
         "gfr_velocity", "settlement_p_win", "signal", "vix_change",
     ])
     n_dec = _post_batch("decisions", decisions, [
-        "date", "ticker", "slug", "gap_bps", "yes_bid", "yes_ask",
+        "id", "date", "ticker", "slug", "gap_bps", "yes_bid", "yes_ask",
         "spread_bps", "entry_side", "entry_price", "position_size",
         "decision", "expected_edge", "book_depth", "adj_wr",
         "gfr_at_entry", "spread_at_entry", "created_at",
     ])
     n_out = _post_batch("outcomes", outcomes, [
-        "decision_id", "date", "ticker", "resolved_yes",
+        "id", "decision_id", "date", "ticker", "resolved_yes",
         "pnl_usd", "closed_at", "exit_price", "exit_type",
     ])
     print(f"  Supabase REST sync: {n_scan} scan rows, {n_dec} decisions, {n_out} outcomes")

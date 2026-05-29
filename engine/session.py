@@ -320,7 +320,9 @@ async def trading_session_loop():
 
                     # Use settlement_p as win_rate for Kelly sizing when available;
                     # fall back to adj_wr for the rare FALLBACK tag path.
-                    _win_rate = entry.get("settlement_p") or entry.get("adj_wr") or 0.60
+                    # settlement_p is always P(YES settles) — flip it for NO trades.
+                    _raw_p    = entry.get("settlement_p") or entry.get("adj_wr") or 0.60
+                    _win_rate = (1.0 - _raw_p) if entry["side"] == "NO" else _raw_p
                     _psize    = compute_position_size(_win_rate, entry["entry_price"])
                     _dec_id   = store_decision(
                         datetime.now().strftime("%Y-%m-%d"),

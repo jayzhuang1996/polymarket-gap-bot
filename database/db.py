@@ -232,6 +232,7 @@ def store_decision(
         )
         row_id = cur.lastrowid
     _rest_insert("decisions", {
+        "id": row_id,
         "date": date_str, "ticker": ticker, "slug": slug,
         "gap_bps": gap_bps, "yes_bid": yes_bid, "yes_ask": yes_ask,
         "spread_bps": spread_bps, "entry_side": entry_side, "entry_price": entry_price,
@@ -304,6 +305,7 @@ def store_outcome(
         )
         row_id = cur.lastrowid
     _rest_insert("outcomes", {
+        "id": row_id,
         "decision_id": decision_id, "date": date_str, "ticker": ticker,
         "resolved_yes": resolved_yes, "pnl_usd": pnl_usd,
         "closed_at": now, "exit_price": exit_price, "exit_type": exit_type,
