@@ -13,7 +13,7 @@ from engine.sizer import compute_position_size
 from engine.strategy import (
     _et_now_hm, _in_market_hours, _entry_frozen, _is_late_entry, _is_thursday,
     _entry_edge_min, _fetch_vix_change, _vix_zone, _check_entry, _check_exit,
-    ENTRY_CONFIRMATIONS_NEEDED, GFR_COOLDOWN_MINUTES, FULLY_EXITED_THRESHOLD,
+    ENTRY_CONFIRMATIONS_NEEDED, FULLY_EXITED_THRESHOLD,
 )
 from engine.data_feed import _token_id
 from engine.order_manager import ORDER_TTL_SEC
@@ -86,6 +86,36 @@ def get_session_state() -> dict:
         "entry_frozen":        _entry_frozen(h, m),
         "et_time":             f"{h:02d}:{m:02d}",
     }
+
+
+# ── Re-entry gate ─────────────────────────────────────────────────────────────
+
+def _confidence_gate_ok(ticker: str, q: dict, open_positions: dict) -> bool:
+    """Model-confidence gate for re-entry after a partial exit.
+
+    Re-entry is allowed when the settlement model has returned clearly to the
+    original trade direction — not just a noisy 0.55 touch.
+
+    Thresholds:
+        Original NO  → settlement_p_win ≤ 0.35  (strongly bearish on YES)
+        Original YES → settlement_p_win ≥ 0.65  (strongly bullish on YES)
+
+    The 8% edge floor is enforced separately by _check_entry(reentry=True).
+    """
+    if ticker in state._session_aborted:
+        return False
+    position = open_positions.get(ticker)
+    if not position:
+        return False
+    original_side = position.get("entry_side")
+    s_p_win = q.get("settlement_p_win")
+    if s_p_win is None or not original_side:
+        return False
+    if original_side == "NO":
+        return s_p_win <= 0.35
+    if original_side == "YES":
+        return s_p_win >= 0.65
+    return False
 
 
 # ── Session loop ───────────────────────────────────────────────────────────────
@@ -265,12 +295,7 @@ async def trading_session_loop():
             in_position    = display in open_positions
             remaining      = state._remaining_fractions.get(display, 1.0)
             fully_exited   = in_position and remaining < FULLY_EXITED_THRESHOLD
-            cooldown_start = state._gfr_exit_cooldowns.get(display)
-            cooldown_ok    = (
-                cooldown_start is not None and
-                (datetime.now() - cooldown_start).total_seconds() / 60 >= GFR_COOLDOWN_MINUTES
-            )
-            eligible_reentry = fully_exited and cooldown_ok
+            eligible_reentry = fully_exited and _confidence_gate_ok(display, q, open_positions)
 
             # ── Entry ─────────────────────────────────────────────────────
             if (not in_position or eligible_reentry) and not _entry_frozen(h, m):
@@ -283,7 +308,7 @@ async def trading_session_loop():
                     state._exit_triggers_fired[display] = set()
                     if is_reentry:
                         state._remaining_fractions[display] = 1.0
-                        del state._gfr_exit_cooldowns[display]
+                        state._gfr_exit_cooldowns.pop(display, None)
                     tag_str  = entry["tag"]
                     tag_str += "  REENTRY" if is_reentry else ""
                     tag_str += "  LATE"    if entry["late"] else ""
@@ -363,12 +388,6 @@ async def trading_session_loop():
                         state._remaining_fractions[display] = (
                             state._remaining_fractions.get(display, 1.0) * (1.0 - frac)
                         )
-
-                        if reason in ("gfr<-0.5_fading", "gfr<-0.8_reversed"):
-                            if display not in state._gfr_exit_cooldowns:
-                                state._gfr_exit_cooldowns[display] = datetime.now()
-                                print(f"  [session] GFR cooldown started for {display}"
-                                      f" — re-entry eligible after {GFR_COOLDOWN_MINUTES}min")
 
                         if reason == "no_trail_stop":
                             state._session_aborted.add(display)

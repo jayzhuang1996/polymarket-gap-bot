@@ -299,7 +299,7 @@ def _check_entry(
         return None
 
     # Price sanity: token must be in tradeable range
-    if not entry_price or entry_price > 0.85 or entry_price < 0.40:
+    if not entry_price or entry_price > 0.90 or entry_price < 0.40:
         return None
 
     spread     = q.get("yes_spread") if side == "YES" else q.get("no_spread")
