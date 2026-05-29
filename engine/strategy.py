@@ -26,9 +26,6 @@ from config import (
     VIX_CHANGE_BEARISH_MIN, VIX_BULLISH_EDGE_DISCOUNT, VIX_BEARISH_EDGE_PENALTY,
     NO_PROFIT_LOCK_GAIN, NO_PROFIT_LOCK_FRAC,
     NO_TRAIL_STOP_DROP, NO_TRAIL_STOP_FRAC, NO_TRAIL_MIN_PEAK,
-    TICKER_GFR_EXIT_SHALLOW, TICKER_GFR_EXIT_DEEP,
-    GFR_EXIT_FRAC_YES_SHALLOW, GFR_EXIT_FRAC_YES_DEEP,
-    GFR_EXIT_FRAC_NO_SHALLOW, GFR_EXIT_FRAC_NO_DEEP,
     GFR_NO_ENTRY_MIN,
     REVERSAL_NO_WR, REVERSAL_NO_WR_DEFAULT, REVERSAL_EDGE_MIN,
 )
@@ -366,20 +363,7 @@ def _check_exit(
         return {"reason": "hard_3pm", "fraction": 1.0,
                 "price": current_bid, "profit_pct": profit_pct}
 
-    # 2. GFR-based exits (YES only: calibrated WR 18% when gfr < -0.5)
-    if gfr is not None:
-        gfr_shallow = TICKER_GFR_EXIT_SHALLOW.get(ticker, -0.5)
-        gfr_deep    = TICKER_GFR_EXIT_DEEP.get(ticker, -0.8)
-        f_shallow   = GFR_EXIT_FRAC_YES_SHALLOW if side == "YES" else GFR_EXIT_FRAC_NO_SHALLOW
-        f_deep      = GFR_EXIT_FRAC_YES_DEEP    if side == "YES" else GFR_EXIT_FRAC_NO_DEEP
-        if f_deep > 0 and gfr < gfr_deep and "gfr_08" not in fired:
-            return {"reason": "gfr<-0.8_reversed", "fraction": f_deep,
-                    "price": current_bid, "profit_pct": profit_pct}
-        if f_shallow > 0 and gfr < gfr_shallow and "gfr_05" not in fired:
-            return {"reason": "gfr<-0.5_fading", "fraction": f_shallow,
-                    "price": current_bid, "profit_pct": profit_pct}
-
-    # 3. NO trade intraday protection
+    # 2. NO trade intraday protection
     if side == "NO":
         if current_bid >= entry_price + NO_PROFIT_LOCK_GAIN and "no_profit_lock" not in fired:
             return {"reason": "no_profit_lock", "fraction": NO_PROFIT_LOCK_FRAC,
@@ -390,7 +374,7 @@ def _check_exit(
             return {"reason": "no_trail_stop", "fraction": NO_TRAIL_STOP_FRAC,
                     "price": current_bid, "profit_pct": profit_pct}
 
-    # 4. Settlement model exits — per-side (v2: NO exit when p_yes > 0.55)
+    # 3. Settlement model exits — per-side
     s_p_win = q.get("settlement_p_win")
     if s_p_win is not None:
         if side == "YES":
@@ -409,23 +393,24 @@ def _check_exit(
             return {"reason": "settlement_edge_gone", "fraction": 0.80,
                     "price": current_bid, "profit_pct": profit_pct}
 
-    # 5. Edge-exhaustion profit lock (adj_wr fallback, no settlement model)
+    # 4. Edge-exhaustion profit lock (adj_wr fallback, no settlement model)
     if (s_p_win is None and adj_wr is not None and profit_pct >= 0.15
             and gfr is not None and gfr < 0 and "edge_exhausted" not in fired):
         if adj_wr * payout - current_bid <= 0:
             return {"reason": "edge_exhausted_profit_lock", "fraction": 0.85,
                     "price": current_bid, "profit_pct": profit_pct}
 
-    # 6. Tiered time exits
+    # 5. Tiered time exits
     if (h, m) >= (15, 0) and "time_exit_3pm" not in fired:
         return {"reason": "time_exit_3pm", "fraction": 1.0,
                 "price": current_bid, "profit_pct": profit_pct}
     if (h, m) >= (14, 30) and "time_exit_230" not in fired:
-        if not (current_bid >= 0.85 and gfr is not None and gfr >= 0.2):
+        # Hold through 2:30 only if bid is near-certain win AND model highly confident
+        if not (current_bid >= 0.85 and s_p_win is not None and s_p_win >= 0.80):
             return {"reason": "time_exit_230", "fraction": 1.0,
                     "price": current_bid, "profit_pct": profit_pct}
     if (h, m) >= (14, 0) and "time_exit_2pm" not in fired:
-        if not (current_bid >= 0.85 and gfr is not None and gfr >= 0.5):
+        if not (current_bid >= 0.85 and s_p_win is not None and s_p_win >= 0.85):
             return {"reason": "time_exit_2pm", "fraction": 1.0,
                     "price": current_bid, "profit_pct": profit_pct}
 
