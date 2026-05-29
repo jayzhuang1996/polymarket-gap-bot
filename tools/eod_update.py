@@ -262,22 +262,37 @@ def _sync_sqlite_to_supabase(d: date) -> None:
         "Prefer": "resolution=ignore-duplicates,return=minimal",
     }
 
-    from database.db import get_scan_log, get_decisions_by_date, get_outcomes_for_date
+    from database.db import _conn, get_scan_log, get_decisions_by_date, get_outcomes_for_date
     date_str  = d.isoformat()
     scan      = get_scan_log(date_str)
     decisions = [dict(r) for r in get_decisions_by_date(date_str)]
     outcomes  = [dict(r) for r in get_outcomes_for_date(date_str)]
 
-    if not scan and not decisions and not outcomes:
+    # daily_wr and scraped_observations — always sync to Supabase as backup
+    with _conn() as c:
+        obs_rows = [dict(r) for r in c.execute(
+            "SELECT * FROM scraped_observations WHERE date = ?", (date_str,)
+        ).fetchall()]
+        wr_rows = [dict(r) for r in c.execute(
+            "SELECT * FROM daily_wr"
+        ).fetchall()]
+
+    if not scan and not decisions and not outcomes and not obs_rows:
         return
 
-    def _post_batch(table: str, rows: list[dict], keep_keys: list[str]) -> int:
+    def _post_batch(table: str, rows: list[dict], keep_keys: list[str],
+                    prefer: str = "resolution=ignore-duplicates,return=minimal",
+                    on_conflict: str | None = None) -> int:
         if not rows:
             return 0
         payload = [{k: r.get(k) for k in keep_keys} for r in rows]
+        url = f"{supabase_url}/rest/v1/{table}"
+        if on_conflict:
+            url += f"?on_conflict={on_conflict}"
         try:
-            r = _req.post(f"{supabase_url}/rest/v1/{table}",
-                          json=payload, headers=headers, timeout=30)
+            r = _req.post(url, json=payload,
+                          headers={**headers, "Prefer": prefer},
+                          timeout=30)
             if r.status_code in (200, 201):
                 return len(payload)
             print(f"  Supabase {table} sync HTTP {r.status_code}: {r.text[:200]}")
@@ -301,7 +316,19 @@ def _sync_sqlite_to_supabase(d: date) -> None:
         "id", "decision_id", "date", "ticker", "resolved_yes",
         "pnl_usd", "closed_at", "exit_price", "exit_type",
     ])
-    print(f"  Supabase REST sync: {n_scan} scan rows, {n_dec} decisions, {n_out} outcomes")
+    # scraped_observations: upsert on (date, ticker) — omit id to avoid diverged-sequence conflicts
+    n_obs = _post_batch("scraped_observations", obs_rows, [
+        "date", "ticker", "gap_pct", "close_up", "created_at",
+    ], prefer="resolution=merge-duplicates,return=minimal",
+       on_conflict="date,ticker")
+    # daily_wr: upsert on business key — full recompute nightly, values change
+    n_wr = _post_batch("daily_wr", wr_rows, [
+        "id", "ticker", "direction", "win_rate", "observations",
+        "source", "updated_at", "gap_bucket",
+    ], prefer="resolution=merge-duplicates,return=minimal",
+       on_conflict="ticker,direction,gap_bucket")
+    print(f"  Supabase REST sync: {n_scan} scan, {n_dec} decisions, "
+          f"{n_out} outcomes, {n_obs} obs, {n_wr} daily_wr")
 
 
 # ── Stale position cleanup ─────────────────────────────────────────────────────
