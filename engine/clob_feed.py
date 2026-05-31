@@ -95,8 +95,7 @@ def _process_event(ev: dict):
         entry_ask = (q.get("yes_ask") if gap_bps > 50
                      else q.get("no_ask") if gap_bps < -50 else None)
         live_edge = round(adj_wr * payout - entry_ask, 4) if entry_ask else None
-        q["est_edge"]  = live_edge
-        q["live_edge"] = live_edge
+        q["live_edge"] = live_edge   # WR-based; settlement model overwrites in session.py
         q["signal"]    = _compute_signal(gap_bps, q.get("gfr"), live_edge)
     else:
         q["est_edge"] = _est_edge(ticker, q.get("gap_bps"), q.get("yes_ask"), q.get("no_ask"))
@@ -136,27 +135,33 @@ async def initial_rest_fallback():
         try:
             async with httpx.AsyncClient(timeout=10) as c:
                 if not has_yes:
-                    b = await c.get(f"{CLOB_API}/price", params={"token_id": yes_id, "side": "SELL"})
-                    if b.status_code == 200:
-                        p = float(b.json().get("price", 0))
-                        if p > 0:
+                    ask_r = await c.get(f"{CLOB_API}/price", params={"token_id": yes_id, "side": "SELL"})
+                    bid_r = await c.get(f"{CLOB_API}/price", params={"token_id": yes_id, "side": "BUY"})
+                    if ask_r.status_code == 200:
+                        ask_p = float(ask_r.json().get("price", 0))
+                        bid_p = (float(bid_r.json().get("price", 0))
+                                 if bid_r.status_code == 200 else ask_p * 0.95)
+                        if ask_p > 0:
                             state.current_quotes.setdefault(ticker, {"ticker": ticker})
                             state.current_quotes[ticker].update({
-                                "yes_bid":    p * 0.95,
-                                "yes_ask":    p,
-                                "yes_spread": _spread_pct(p * 0.95, p),
+                                "yes_bid":    bid_p,
+                                "yes_ask":    ask_p,
+                                "yes_spread": _spread_pct(bid_p, ask_p),
                                 "updated_at": datetime.now(timezone.utc).isoformat(),
                             })
                 if not has_no:
-                    a = await c.get(f"{CLOB_API}/price", params={"token_id": no_id, "side": "SELL"})
-                    if a.status_code == 200:
-                        p = float(a.json().get("price", 0))
-                        if p > 0:
+                    ask_r = await c.get(f"{CLOB_API}/price", params={"token_id": no_id, "side": "SELL"})
+                    bid_r = await c.get(f"{CLOB_API}/price", params={"token_id": no_id, "side": "BUY"})
+                    if ask_r.status_code == 200:
+                        ask_p = float(ask_r.json().get("price", 0))
+                        bid_p = (float(bid_r.json().get("price", 0))
+                                 if bid_r.status_code == 200 else ask_p * 0.95)
+                        if ask_p > 0:
                             state.current_quotes.setdefault(ticker, {"ticker": ticker})
                             state.current_quotes[ticker].update({
-                                "no_bid":     p * 0.95,
-                                "no_ask":     p,
-                                "no_spread":  _spread_pct(p * 0.95, p),
+                                "no_bid":     bid_p,
+                                "no_ask":     ask_p,
+                                "no_spread":  _spread_pct(bid_p, ask_p),
                                 "updated_at": datetime.now(timezone.utc).isoformat(),
                             })
         except Exception:
@@ -183,28 +188,36 @@ async def periodic_rest_poll():
             for m in state.market_list:
                 ticker = m["ticker"]
                 try:
-                    b = await c.get(f"{CLOB_API}/price",
-                                    params={"token_id": m["yes_token"], "side": "SELL"})
-                    if b.status_code == 200:
-                        p = float(b.json().get("price", 0))
-                        if p > 0:
+                    yes_ask_r = await c.get(f"{CLOB_API}/price",
+                                            params={"token_id": m["yes_token"], "side": "SELL"})
+                    yes_bid_r = await c.get(f"{CLOB_API}/price",
+                                            params={"token_id": m["yes_token"], "side": "BUY"})
+                    if yes_ask_r.status_code == 200:
+                        ask_p = float(yes_ask_r.json().get("price", 0))
+                        bid_p = (float(yes_bid_r.json().get("price", 0))
+                                 if yes_bid_r.status_code == 200 else ask_p * 0.95)
+                        if ask_p > 0:
                             state.current_quotes.setdefault(ticker, {"ticker": ticker, "gap_bps": None})
                             state.current_quotes[ticker].update({
-                                "yes_bid":    p * 0.95,
-                                "yes_ask":    p,
-                                "yes_spread": _spread_pct(p * 0.95, p),
+                                "yes_bid":    bid_p,
+                                "yes_ask":    ask_p,
+                                "yes_spread": _spread_pct(bid_p, ask_p),
                                 "updated_at": datetime.now(timezone.utc).isoformat(),
                             })
-                    a = await c.get(f"{CLOB_API}/price",
-                                    params={"token_id": m["no_token"], "side": "SELL"})
-                    if a.status_code == 200:
-                        p = float(a.json().get("price", 0))
-                        if p > 0:
+                    no_ask_r = await c.get(f"{CLOB_API}/price",
+                                           params={"token_id": m["no_token"], "side": "SELL"})
+                    no_bid_r = await c.get(f"{CLOB_API}/price",
+                                           params={"token_id": m["no_token"], "side": "BUY"})
+                    if no_ask_r.status_code == 200:
+                        ask_p = float(no_ask_r.json().get("price", 0))
+                        bid_p = (float(no_bid_r.json().get("price", 0))
+                                 if no_bid_r.status_code == 200 else ask_p * 0.95)
+                        if ask_p > 0:
                             state.current_quotes.setdefault(ticker, {"ticker": ticker, "gap_bps": None})
                             state.current_quotes[ticker].update({
-                                "no_bid":     p * 0.95,
-                                "no_ask":     p,
-                                "no_spread":  _spread_pct(p * 0.95, p),
+                                "no_bid":     bid_p,
+                                "no_ask":     ask_p,
+                                "no_spread":  _spread_pct(bid_p, ask_p),
                                 "updated_at": datetime.now(timezone.utc).isoformat(),
                             })
                 except Exception:

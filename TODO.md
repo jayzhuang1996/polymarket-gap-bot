@@ -11,14 +11,16 @@
 ### P0 — Fixed
 - [x] `scipy` missing from requirements.txt → Kelly used point estimates instead of 90% CI lower bound. **Fixed May 26.**
 - [x] Algorithm v2 deployed 2026-05-29: model-driven direction, new features (stock_pct_vs_prevclose + momentum_30min), SPRT/3-of-4 removed, per-side settlement exit, per-ticker gap threshold wired.
+- [x] Settlement model v3 retrained 2026-05-31: 8 features (gfr, gfr_velocity, log_tbf, gap_abs, market_p_win, dow_thu, vix_high, stock_pct_vs_prevclose), C=0.1 regularization, AUC 0.764 IS / 0.591 OOS. Feature mismatch bug fixed — old model was silently disabled in production (dimension error on every 5s tick). sklearn version pinned via .venv/bin/python for all training.
+- [x] AMZN exit silent failure fixed 2026-05-31: hard_3pm exit now fires even when current_bid is None/0, falling back to entry_price so position closes at breakeven rather than staying open indefinitely.
 
 ### P1 — Fix Before November
-- [ ] **DST hardcode** — `ET_OFFSET_H = -4` in `engine/strategy.py` and `timedelta(hours=-4)` in `tools/eod_update.py`. Works for EDT (Mar–Nov). In EST (Nov–Mar), strategy clock runs 1 hour ahead: misses 9:30–10:30 AM entries, exits 1 hour late. Fix: use `pytz` or `zoneinfo` to derive offset dynamically.
+- [x] **DST hardcode** — Fixed 2026-05-29. `engine/strategy.py` and `tools/eod_update.py` now use `zoneinfo.ZoneInfo("America/New_York")` with `timedelta(hours=-4)` as fallback (Python < 3.9). `ET_OFFSET_H = -4` kept as fallback constant only.
 
 ### P2 — Operational (non-blocking)
-- [ ] **No daily server restart** — `state.wr_cache` is loaded once at Railway startup and never refreshed. After EOD cron updates `daily_wr` in Supabase, the running server won't see it until next restart. Fix: add a Railway scheduled restart at 9:20 AM ET daily, or reload WR cache at start of each trading day inside `trading_session_loop`.
-- [ ] **Synthetic bid in REST fallback** — `periodic_rest_poll()` uses `p * 0.95` as a synthetic bid when WS hasn't provided real depth. Hardcodes a 5% spread. Real spread can be 10–20% in thin markets. Fix: use `(bid + ask) / 2` from the REST `/book` endpoint instead.
-- [ ] **`_ensure_obs_table()` DDL** — `INTEGER PRIMARY KEY AUTOINCREMENT` is SQLite-only syntax. Harmless since the table already exists in Supabase (`IF NOT EXISTS` skips it), but would fail if the PG schema were ever recreated. Fix: add PG branch same as `rebuild_priors()`.
+- [x] **No daily server restart** — Fixed 2026-05-31. `trading_session_loop()` daily reset block now calls `load_base_wr()` for every ticker and updates `state.wr_cache` immediately after VIX reload. No Railway restart needed.
+- [x] **Synthetic bid in REST fallback** — Fixed 2026-05-29. `initial_rest_fallback()` and `periodic_rest_poll()` now call `GET /price?side=BUY` for real bid alongside the existing SELL call. Falls back to `p * 0.95` only if the BUY call fails.
+- [x] **`_ensure_obs_table()` DDL** — Fixed 2026-05-31. Removed `AUTOINCREMENT` from `tools/eod_update.py` and `tools/scrape_history.py`. Both now use `INTEGER PRIMARY KEY` which is portable across SQLite and PostgreSQL.
 
 ---
 
@@ -26,7 +28,7 @@
 
 ### Pre-session setup
 - [x] Run `python -c "from database.wr_store import daily_update; daily_update()"` — win rates refreshed (120–137 obs per ticker, adj_wr 0.67–0.73)
-- [x] `data/settlement_model.pkl` exists — **v2 model retrained 2026-05-29**: AUC 0.70 OOS (vs old 0.47 on same holdout), features: stock_pos + momentum + log_tbf + yes_vwap + dow_thu
+- [x] `data/settlement_model.pkl` exists — **v3 model retrained 2026-05-31**: AUC 0.764 IS / 0.591 OOS, 8 features. Feature mismatch bug fixed; model now active in production.
 - [x] Server running on Railway — `polymarket-gap-bot-production.up.railway.app`
 - [x] EOD cron running on Railway — fires at 4:20 PM ET weekdays
 
@@ -58,11 +60,21 @@
 - [x] Railway cron service: `python tools/eod_update.py` at `20 21 * * 1-5` (UTC)
 - [x] Fix `INSERT OR IGNORE` → `ON CONFLICT DO NOTHING` in `eod_update.py` for PG
 - [x] Add `holidays` + `pyarrow` to requirements.txt
-- [ ] Verify first cron run fires tonight (May 26) — check Railway cron deploy logs after 4:20 PM ET
-- [ ] Confirm `scraped_observations` row count +9 in Supabase after first run
-- [ ] Unload `com.polymarket.eod_update.plist` from local launchd once Railway cron confirmed working
+- [x] Verified Railway cron fires at 4:20 PM ET — confirmed 2026-05-29
+- [x] `scraped_observations` and `daily_wr` now mirrored to Supabase nightly
+- [x] Mac launchd crons loaded: eod_update (1:20pm PT), scan, resolve — confirmed 2026-05-29
 
-**Note:** Steps 2–4 of `eod_pipeline.py` (model retraining) stay local. Railway filesystem is ephemeral — parquet trade history files don't persist across deploys. Run monthly from Mac after 30+ new sessions.
+### Phase 4 — Mac EOD automation ✓
+- [x] `eod_pipeline.py` rewritten: 5-step pipeline (scrape → extend → calibrate → retrain → git deploy)
+- [x] Auto-backfill: detects up to 5 missed trading days via `scraped_observations` gaps + NYSE calendar
+- [x] Auto-deploy: `git push origin main` in step 5 — Railway picks up updated pkl automatically
+- [x] `daily_wr` added to Supabase mirror (upsert on `ticker+direction+gap_bucket`)
+- [x] `scraped_observations` added to Supabase mirror (upsert on `date+ticker`)
+- [x] Supabase schema: `daily_wr` unique constraint updated to `(ticker, direction, gap_bucket)`
+- [x] NO trade position_size bug fixed: sizer now receives `1 − settlement_p` for NO side
+- [x] Duplicate Supabase row bug fixed: `id` now included in REST payload for decisions + outcomes
+
+**Note:** Model retraining is now daily (not monthly). Railway filesystem is ephemeral — parquet files stay local. Mac cron handles everything; no manual steps needed unless Mac was asleep (run `eod_pipeline.py` once to backfill).
 
 ---
 
@@ -74,19 +86,20 @@
 - [x] **VIX 30-min refresh** — re-fetched every 15 × 2-min ticks during market hours. Catches mid-morning VIX spikes.
 - [x] **Intraday reversal NO trades** — gap-UP day + GFR < −1.0 triggers `_check_reversal_entry()`. Bypasses signal history; GFR crossing is own trigger. Historical: 338 events, 67.2% NO WR, +14.8% edge. Calibrated REVERSAL_NO_WR per ticker in `config.py`.
 - [x] **Better NO entry signal** — addressed by reversal path above. GFR < −1.0 is the data-driven trigger for NO entries on gap-UP days (historical NO WR 59–85% by ticker).
+- [ ] **Model-vs-gap direction agreement analysis** — v2 model can flip YES/NO relative to overnight gap. Edge estimates in STRATEGY_EXPLANATION.md Section 2 are from gap-direction base rates. We have never measured: (a) edge when model AGREES with gap direction, (b) edge when model DISAGREES. Run `tools/oos_validation.py`-style split on `full_session_2min.csv`: for sessions in the holdout period, tag each 2-min row by model_direction == gap_direction or not, compute WR per group. If model-disagrees edge is negative, the v2 entry path is losing money on a subset of trades with no current detection mechanism.
 - [ ] **Sector correlation cap** — max 1 position per sector group prevents 4 simultaneous tech-long positions. Tech group: NVDA/TSLA/AAPL/META/MSFT/GOOGL/NFLX.
 
 ---
 
 ## Medium-Term (data-dependent)
 
-- [ ] **Monthly model retraining workflow** — after 30+ sessions: run `eod_pipeline.py` locally (steps 2-4), commit updated `settlement_model.pkl` + `exit_model_calibration.csv`, push → Railway auto-deploys with fresh models.
+- [x] **Daily model retraining workflow** — `eod_pipeline.py` runs nightly via Mac cron (1:20pm PT). Auto-backfills missed days, retrains models, git-pushes to Railway. No manual steps needed.
 - [ ] **Ticker-specific calibration sub-tables** — check per-ticker cell density ≥ 30 after splitting.
 - [ ] **CLOB exit discount calibration** — hardcoded `CLOB_EXIT_DISCOUNT = 0.05` is a guess. Track estimated vs actual exit price from paper trades.
 - [ ] **REVERSAL_NO_WR recalibration** — current values from 338 historical events (Oct 2025–May 2026). Recalibrate after 50+ live reversal trades accumulate per ticker from paper/live runs.
 - [ ] **90¢ reverse NO bet module** — distinct from REVERSAL path. Targets gap-DOWN days where YES ran to 90¢+ (settlement near-certain) then fades. After 1pm, if YES ≥ 90¢ AND GFR flat/fading AND settlement_prob < 0.88 → enter NO at ~10¢.
 - [ ] **Gap size segmentation in calibration table** — add gap bucket dimension (small: 0.5–2%, large: ≥2%).
-- [ ] **Daily WR cache refresh** — reload `wr_cache` at start of each trading day in `trading_session_loop` so updated Supabase values are used without a server restart.
+- [x] **Daily WR cache refresh** — Fixed 2026-05-31. See P2 fix above.
 
 ---
 
@@ -97,6 +110,7 @@
 | ~~GFR missing Oct 2025 → Feb 2026~~ | ~~Exit model less accurate~~ | Solved — Twelve Data backfill |
 | OOS validation only 22 days | Can't confirm edge persistence | Re-run monthly as paper trades accumulate |
 | Backtest tools use flat 0.5% threshold | Overstated edge on high-beta tickers | Update `tools/backtest_may20.py` to use `TICKER_GAP_THRESHOLD` |
+| `stock_daily_obs` stale (last entry 2026-05-22) | Different table from `scraped_observations`; populated by a separate pipeline step not running | Low priority — does not affect live trading or model training |
 
 ---
 

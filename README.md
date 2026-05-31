@@ -11,9 +11,9 @@ Live 9-ticker paper trading bot that exploits a structural mispricing in Polymar
 | Layer | What runs there |
 |-------|----------------|
 | **Railway** (server service) | `server.py` — 24/7, auto-restarts on crash |
-| **Railway** (cron service) | `tools/eod_update.py` — 4:20 PM ET weekdays |
-| **Supabase** (PostgreSQL) | All persistent state: decisions, outcomes, WR, live_quotes |
-| **Local Mac** | Monthly model retraining only (`tools/eod_pipeline.py --steps 2-4`) |
+| **Railway** (cron service) | `tools/eod_update.py` — 4:20 PM ET weekdays; writes Railway SQLite + Supabase batch sync |
+| **Supabase** (PostgreSQL) | Remote mirror: decisions, outcomes, scan_log, daily_wr, scraped_observations |
+| **Local Mac** | Daily model retraining (`tools/eod_pipeline.py` — Mac cron 1:20 PM PT, auto-backfill + auto-deploy) |
 
 Dashboard: `https://polymarket-gap-bot-production.up.railway.app`
 GitHub: `https://github.com/jayzhuang1996/polymarket-gap-bot`
@@ -96,11 +96,16 @@ server.py                      ← FastAPI entrypoint + startup wiring
          │    settlement P(win) per-side →                            │
          │    write to Supabase outcomes                              │
          └─────────────────────────────────────────────────────────────┘
-                           ↓ 4:20pm ET (Railway cron)
-         eod_update.py: scrape outcomes → scraped_observations → daily_wr
-                           ↓ monthly (local Mac)
-         eod_pipeline.py: rebuild full_session_2min.csv → retrain models
-         → commit updated pkl + csv → Railway auto-deploys
+                           ↓ 4:20pm ET (Railway cron — auto)
+         eod_update.py: scrape outcomes → scraped_observations + daily_wr
+                       → batch sync decisions/outcomes/scan_log/daily_wr/scraped_obs to Supabase
+                           ↓ 1:20pm PT = 4:20pm ET (Mac launchd cron — auto, with backfill)
+         eod_pipeline.py:
+           step 1: eod_update.py → {ticker}_trades.parquet + local SQLite + Supabase
+           step 2: extend_2min_data.py → full_session_2min.csv + settlement_probability.csv
+           step 3: calibrate_exit_model.py → exit_model_calibration.csv
+           step 4: train_settlement_model.py → settlement_model.pkl
+           step 5: git push → Railway auto-deploys updated models
 ```
 
 ---
@@ -154,7 +159,7 @@ Logistic regression predicting P(YES settles) at any intraday moment.
 | VIX regime filter (30-min refresh during market hours) | Done |
 | GFR-based exit ladder (direction-asymmetric) | Done |
 | NO trade protection (profit lock + trailing stop) | Done |
-| Settlement model (AUC 0.8095, Brier 0.1654) | Done |
+| Settlement model v2 (AUC 0.7928 OOS, retrained 2026-05-29) | Done |
 | Session crash recovery (reconcile on restart) | Done |
 | Supabase migration (PostgreSQL, 8 tables, 12K+ rows) | Done |
 | Railway server deploy (24/7, auto-restart) | Done |
@@ -163,21 +168,24 @@ Logistic regression predicting P(YES settles) at any intraday moment.
 
 ---
 
-## Monthly Maintenance (local Mac)
+## Daily Maintenance (automated)
 
 ```bash
-# After 30+ new sessions have accumulated:
+# Nothing to do — Mac launchd cron fires at 1:20pm PT every weekday:
+#   python tools/eod_pipeline.py
+# This handles: scrape → build CSV → retrain models → git push → Railway deploys
 
-# 1. Retrain models with new data
-python tools/eod_pipeline.py   # steps 2-4: rebuild session csv + retrain pkl + csv
+# If Mac was asleep and you missed days, run once to catch up:
+python tools/eod_pipeline.py   # auto-detects and backfills up to 5 missed trading days
 
-# 2. Run OOS validation
+# To skip model retraining (data only):
+python tools/eod_pipeline.py --skip-models
+
+# To process a specific date only:
+python tools/eod_pipeline.py --date 2026-05-23
+
+# Monthly: run OOS validation after 30+ new sessions have accumulated
 python tools/oos_validation.py
-
-# 3. Commit updated artifacts and push → Railway auto-deploys
-git add data/settlement_model.pkl data/exit_model_calibration.csv
-git commit -m "chore: retrain models — [date]"
-git push
 ```
 
 ---

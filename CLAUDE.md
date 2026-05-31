@@ -50,7 +50,7 @@ If the data doesn't support it, say so. If the edge is thin, quantify it. If the
 - Push back when warranted. If an assumption doesn't hold, state it clearly.
 - Match length to signal density — one sentence is fine if it contains the decision.
 - Use trading language, not engineering language. Edge, WR, slippage, drawdown, regime, Sharpe. Not "code quality," "test coverage," "file organization."
-- **Always explain jargon in plain English when introducing technical terms.** When a term like "GFR," "Bayesian blend," or "adj_wr" comes up, immediately follow it with a one-sentence layman explanation using a concrete scenario or analogy. Example format: "GFR (Gap Fill Ratio) — think of it as a measure of how much of the overnight price jump has been reversed during the trading day; if NVDA jumped $40 overnight and has since fallen $20, GFR = 0.5." Do this even for terms used earlier in the session — Jay may not remember them.
+- **Always explain jargon in plain English when introducing technical terms.** When a term like "GFR," "Bayesian blend," or "adj_wr" comes up, immediately follow it with a one-sentence layman explanation using a **concrete scenario with real numbers** — not analogies. Example format: "GFR (Gap Fill Ratio) — NVDA closed at $900 yesterday. It opens today at $940 (+$40 gap). By 10am it has fallen to $920. GFR = (920 − 940) / (940 − 900) = −0.5, meaning half the gap has been erased." Do this even for terms used earlier in the session. **Never use analogies** ("it's like," "think of it as," "similar to") — always explain by working through specific numbers and outcomes.
 
 ## Session Ritual
 
@@ -59,6 +59,21 @@ Before every response:
 2. Check the current P&L and WR data if relevant to the topic.
 3. Ask: "Is there data for this claim, or is it an assumption?"
 4. Lead with the trading impact, not the implementation detail.
+
+## Pre-Deploy Checklist (before every Railway redeploy / git push)
+
+Before pushing any strategy or engine change to Railway, confirm these docs reflect the current state of the code:
+
+| File | What to check |
+|------|--------------|
+| `README.md` | Key Parameters table (entry window, edge floors), Component Status, Data Flow |
+| `STRATEGY_EXPLANATION.md` | Algorithm flowchart gates (freeze time, edge tiers), REVERSAL path, adj_wr formula, conviction system |
+| `TODO.md` | Mark completed items `[x]`; add new items for any new known risks or follow-ups |
+| `lesson.md` | Add a lesson for any new edge finding, bug class, or system behavior discovered this cycle |
+
+If code changed but docs are already accurate, no update needed — but confirm it explicitly. Do not push without checking.
+
+---
 
 ## What Stays from Global
 

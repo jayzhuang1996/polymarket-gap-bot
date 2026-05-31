@@ -32,8 +32,13 @@ from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 
 ROOT   = Path(__file__).resolve().parent.parent
-PYTHON = sys.executable
 TOOLS  = ROOT / "tools"
+
+# Always use the project venv for model training so the saved pkl is compatible
+# with Railway's runtime (which also uses this venv).  Fall back to sys.executable
+# if the venv doesn't exist (e.g. first-run on a fresh machine).
+_VENV_PY = ROOT / ".venv" / "bin" / "python"
+PYTHON = str(_VENV_PY) if _VENV_PY.exists() else sys.executable
 
 
 def _run(label: str, script: Path, extra_args: list[str] = []) -> bool:

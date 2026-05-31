@@ -141,7 +141,7 @@ def _ensure_obs_table():
     try:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS scraped_observations (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                id          INTEGER PRIMARY KEY,
                 date        TEXT    NOT NULL,
                 ticker      TEXT    NOT NULL,
                 gap_pct     REAL    NOT NULL,

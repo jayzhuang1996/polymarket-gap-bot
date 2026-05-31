@@ -191,6 +191,8 @@ async def stock_price_loop():
                 if len(hist) > 20:
                     hist.pop(0)
 
+                yes_vwap = q.get("yes_ask") or 0.5
+
                 settlement_p_win = settlement_edge = None
                 if settlement_available():
                     tbf_min  = max(2, int(390 - (
@@ -199,14 +201,18 @@ async def stock_price_loop():
                         ET_OFFSET_H * 60 - 9 * 60 - 30
                     )))
                     tbf_min  = max(2, min(390, tbf_min))
-                    yes_vwap = q.get("yes_ask") or 0.5
                     yes_bid  = q.get("yes_bid") or yes_vwap
+                    gap_pct  = (q.get("gap_bps") or 0) / 100.0
                     settlement_p_win, settlement_edge = settlement_predict(
-                        stock_pct_vs_prevclose=stock_pos,
-                        momentum_30min=momentum_30min,
+                        gfr=gfr,
+                        gfr_velocity=gfr_velocity,
                         tbf_min=tbf_min,
+                        gap_pct=gap_pct,
                         yes_vwap=yes_vwap,
+                        gap_up=gap_up,
                         dow=datetime.now().strftime("%a"),
+                        vix_high=state._vix_high,
+                        stock_pct_vs_prevclose=stock_pos,
                         current_token_bid=yes_bid,
                     )
 

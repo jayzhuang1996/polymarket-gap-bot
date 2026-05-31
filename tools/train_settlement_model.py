@@ -5,14 +5,16 @@ Logistic regression: P(trade wins) given live intraday state.
     win = 1  ← YES token wins (gap_up=True) OR NO token wins (gap_up=False)
 
 Features
-    gfr           gap fill ratio, clipped [-3, 3]
-    gfr_velocity  2-min change in gfr, clipped [-1, 1]
-    log_tbf       log1p(tbf_min) — log time-before-expiry
-    gap_abs       abs(gap_pct), clipped at 0.15 — original gap magnitude
-    market_p_win  current token price re-expressed as P(our trade wins):
-                  yes_vwap if gap_up else (1 − yes_vwap)
-    dow_thu       1 if Thursday (lower WR day)
-    vix_high      1 if VIX > 20 (set to 0 for all training rows; live value used at inference)
+    gfr                    gap fill ratio, clipped [-3, 3]
+    gfr_velocity           2-min change in gfr, clipped [-1, 1]
+    log_tbf                log1p(tbf_min) — log time-before-expiry
+    gap_abs                abs(gap_pct), clipped [0, 5] — original gap magnitude
+    market_p_win           current token price re-expressed as P(our trade wins):
+                           yes_vwap if gap_up else (1 − yes_vwap)
+    dow_thu                1 if Thursday (lower WR day)
+    vix_high               1 if VIX > 20 (set to 0 for all training rows; live value used at inference)
+    stock_pct_vs_prevclose (current_price − prev_close) / prev_close × 100, clipped [-15, 15]
+                           Where the underlying stock is right now vs yesterday's close.
 
 Output  data/settlement_model.pkl  — dict with 'scaler', 'model', 'feature_names'
 
@@ -38,7 +40,10 @@ from sklearn.preprocessing import StandardScaler
 DATA_CSV   = Path("data/full_session_2min.csv")
 MODEL_PATH = Path("data/settlement_model.pkl")
 
-FEATURE_NAMES = ["gfr", "gfr_velocity", "log_tbf", "gap_abs", "market_p_win", "dow_thu", "vix_high"]
+FEATURE_NAMES = [
+    "gfr", "gfr_velocity", "log_tbf", "gap_abs", "market_p_win",
+    "dow_thu", "vix_high", "stock_pct_vs_prevclose",
+]
 
 
 # ── Feature engineering ───────────────────────────────────────────────────────
@@ -56,25 +61,22 @@ def build_features(df_raw: pd.DataFrame) -> pd.DataFrame:
     # Target: did our side win?
     df["win"] = ((df["gap_up"]) == (df["outcome_yes"] == 1)).astype(int)
 
-    # ── gfr_velocity ──────────────────────────────────────────────────────────
-    # Within each (ticker, date) session, compute 2-min change in gfr.
-    # Sort descending on tbf_min so each diff() step moves forward in wall time.
+    # ── Time-series features: sort forward in wall time within each session ──
+    # tbf_min descending = moving from 9:30am toward 4pm as index increases.
     df = df.sort_values(["ticker", "date", "tbf_min"], ascending=[True, True, False])
-    # gfr NaN means intraday stock price wasn't captured for that row.
-    # Fill with 0 (neutral: gap intact, no movement observed yet).
     df["gfr"] = df["gfr"].fillna(0.0)
-    df["gfr_velocity"] = (
-        df.groupby(["ticker", "date"])["gfr"].diff(1).fillna(0)
-    )
 
-    # ── Features ─────────────────────────────────────────────────────────────
-    df["gfr"]          = df["gfr"].clip(-3.0, 3.0)
-    df["gfr_velocity"] = df["gfr_velocity"].clip(-1.0, 1.0)
-    df["log_tbf"]      = np.log1p(df["tbf_min"])
-    df["gap_abs"]      = df["gap_pct"].abs().clip(0, 5.0)
-    df["market_p_win"] = np.where(df["gap_up"], df["yes_vwap"], 1.0 - df["yes_vwap"])
-    df["dow_thu"]      = (df["dow"] == "Thu").astype(int)
-    df["vix_high"]     = 0  # unknown for historical data; live value injected at inference
+    df["gfr_velocity"]           = df.groupby(["ticker", "date"])["gfr"].diff(1).fillna(0)
+
+    # ── Scalar features ───────────────────────────────────────────────────────
+    df["gfr"]                    = df["gfr"].clip(-3.0, 3.0)
+    df["gfr_velocity"]           = df["gfr_velocity"].clip(-1.0, 1.0)
+    df["log_tbf"]                = np.log1p(df["tbf_min"])
+    df["gap_abs"]                = df["gap_pct"].abs().clip(0, 5.0)
+    df["market_p_win"]           = np.where(df["gap_up"], df["yes_vwap"], 1.0 - df["yes_vwap"])
+    df["dow_thu"]                = (df["dow"] == "Thu").astype(int)
+    df["vix_high"]               = 0  # unknown for historical rows; live value injected at inference
+    df["stock_pct_vs_prevclose"] = df["stock_pct_vs_prevclose"].clip(-15.0, 15.0)
 
     # Drop rows missing any feature or target
     keep_cols = FEATURE_NAMES + ["win", "date", "ticker"]
@@ -118,8 +120,10 @@ def train_model(df: pd.DataFrame, test_frac: float = 0.20) -> dict:
     X_tr_s = scaler.fit_transform(X_tr)
     X_te_s = scaler.transform(X_te)
 
-    # Logistic regression with Platt scaling for probability calibration
-    base  = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
+    # Logistic regression with Platt scaling for probability calibration.
+    # C=0.1 (stronger regularization) prevents GFR from dominating unchecked
+    # and forces weight distribution across the weaker but regime-stable features.
+    base  = LogisticRegression(C=0.1, max_iter=1000, random_state=42)
     model = CalibratedClassifierCV(base, cv=5, method="sigmoid")
     model.fit(X_tr_s, y_tr)
 

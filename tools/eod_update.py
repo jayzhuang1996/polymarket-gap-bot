@@ -72,8 +72,12 @@ def is_market_closed(d: date) -> tuple[bool, str]:
 
 
 def _et_now() -> dt:
-    """Current datetime in ET (naive). US Eastern = UTC-4 (EDT)."""
-    return dt.now(timezone.utc) + timedelta(hours=-4)
+    """Current datetime in ET (naive)."""
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.now(ZoneInfo("America/New_York")).replace(tzinfo=None)
+    except ImportError:
+        return dt.now(timezone.utc) + timedelta(hours=-4)
 
 
 def should_run(d: date) -> tuple[bool, str]:
@@ -198,7 +202,7 @@ def _ensure_obs_table():
     try:
         c.execute("""
             CREATE TABLE IF NOT EXISTS scraped_observations (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                id          INTEGER PRIMARY KEY,
                 date        TEXT    NOT NULL,
                 ticker      TEXT    NOT NULL,
                 gap_pct     REAL    NOT NULL,

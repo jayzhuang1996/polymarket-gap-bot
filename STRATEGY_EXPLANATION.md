@@ -217,10 +217,10 @@ Check in priority order. First matching condition fires. Each trigger fires once
 │     Example: Entered at 40¢. Token ran to 55¢. Falls to 46¢. 46¢ < 55¢ − 8¢ → EXIT.
 │
 ├─ LEVEL 5 — SETTLEMENT MODEL EXIT
-│     Logistic regression trained on 57,313 historical Polymarket sessions.
-│     Inputs: GFR, GFR velocity (change over last 2 min), time to close, gap size,
-│             Polymarket's own implied probability, day of week, VIX high flag.
-│     Output: P(this trade wins at 4pm)
+│     Logistic regression trained on ~66,998 2-min intervals (Oct 2025–present).
+│     Inputs: stock_pct_vs_prevclose, momentum_30min, log(time_before_close),
+│             yes_vwap, dow_thu. AUC 0.7928 OOS (retrained 2026-05-29).
+│     Output: P(YES settles at $1)
 │
 │     Exit when:
 │       P(win) < 45% → SELL 100% (gap reversing hard, model says losing)
@@ -239,18 +239,21 @@ Check in priority order. First matching condition fires. Each trigger fires once
 
 
 ╔══════════════════════════════════════════════════════════════════╗
-║  END OF SESSION (4:20pm ET, automated via launchd)              ║
+║  END OF SESSION (1:20pm PT / 4:20pm ET, automated via launchd)  ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-eod_pipeline.py chains 4 steps:
-  Step 1: eod_update.py — scrapes Polymarket resolutions, appends scraped_observations,
-          calls daily_update() to rebuild daily_wr from all observations to date
-  Step 2: full_session_analysis.py — rebuilds full_session_2min.csv (57,470 rows)
-  Step 3: calibrate_exit_model.py — rebuilds exit model calibration table
-  Step 4: train_settlement_model.py — retrains logistic regression
+eod_pipeline.py chains 5 steps (auto-backfills up to 5 missed trading days):
+  Step 1: eod_update.py — scrapes Polymarket Core API → appends {ticker}_trades.parquet,
+          scraped_observations, daily_wr (local SQLite); batch-syncs to Supabase
+  Step 2: extend_2min_data.py — appends today's 2-min intervals to full_session_2min.csv
+          (~66,998 rows), regenerates settlement_probability.csv
+  Step 3: calibrate_exit_model.py — rebuilds exit_model_calibration.csv
+  Step 4: train_settlement_model.py — retrains logistic regression → settlement_model.pkl
+  Step 5: git push origin main — Railway auto-deploys updated models on next startup
 
-Pipeline aborts on Step 1 or 2 failure. Continues past Step 3/4 failure (model rebuilds
-are non-critical; previous day's models remain active).
+Steps 1+2 run per missed date (loop); Steps 3+4 run once after all dates are processed.
+Pipeline aborts on Step 1 or 2 failure. Continues past Step 3 failure (non-critical).
+Aborts on Step 4 failure (stale model is better than a failed retrain).
 ```
 
 ---
@@ -393,17 +396,17 @@ As of May 2026: 27/36 cells have insufficient OOS data (<5 obs). The 4 cells wit
 | **isolated_priors** | Win rate from 5 years of daily OHLC stock data only. Kept separate from live Polymarket data to preserve independence. | "NVDA gapped up >1% on 200 days; closed up 144 times → prior WR = 72%." |
 | **daily_wr** | Win rate from actual resolved Polymarket markets (Oct 2025-present). Only trusted once >=30 observations exist. | 87 NVDA gap-up trades, 60 won → daily_wr = 68.9%. Below 30 obs this number is ignored entirely. |
 | **Bayesian blend** | Weighting prior and live WR by observations behind each. Prior treated as 50 virtual observations. | NVDA: (72%×50 + 68.8%×137)/(50+137) = 69.7%. With only 10 real trades, prior carries 83% weight. |
-| **SPRT** | Evidence test that accumulates multiplicatively across 2-min checks. Score >=5.0 → enter; <=0.2 → abort ticker for the day. AMZN and TSLA YES only. | TSLA checks: GO, GO, no-GO, GO → score = 1.37×1.37×0.93×1.37 = 2.39. Still below 5.0 — keep watching. |
-| **LR (Likelihood Ratio)** | The running SPRT score. Starts at 1.0, multiplies up on GO signals, down on non-GO. | AMZN p1=0.43, p0=0.28. Each GO multiplies by 1.54. Four consecutive GOs: 1.54^4 = 5.6 → enter. |
+| **SPRT** | *(Removed in v2 — 2026-05-29)* Sequential probability ratio test. Was used for AMZN/TSLA YES only. Replaced by settlement model confidence gate. | Historical reference: AMZN p1=0.43, p0=0.28. LR needed to reach 5.0 to enter. Four consecutive GOs: 1.54^4 = 5.6 → enter. |
+| **LR (Likelihood Ratio)** | *(Removed in v2)* The running SPRT score. Starts at 1.0, multiplies up on GO signals, down on non-GO. Replaced by settlement model P(YES). | |
 | **Quarter-Kelly** | 25% of the theoretically optimal bet size. Full Kelly is optimal long-run but causes brutal drawdowns. | Full Kelly says bet $400. Quarter-Kelly → $100 max. |
 | **CI lower bound** | 90% confidence interval lower bound of win rate, used for sizing. Thin data means smaller bets automatically. | 20 obs at 70% WR → lower bound ~54% → $22 position. After 200 obs the bound tightens to 64% → $68. |
-| **AUC-ROC** | How often the model ranks a winning trade above a losing one. 0.5=coin flip, 1.0=perfect. v2 model: 0.70 OOS (vs old: 0.47 on same holdout). | Given NVDA (will win) and AAPL (will lose) both in-flight, model assigns NVDA higher P(win) 70% of the time. |
+| **AUC-ROC** | How often the model ranks a winning trade above a losing one. 0.5=coin flip, 1.0=perfect. v2 model has two reported AUCs: (a) **0.70 OOS** — measured on the original holdout used to compare vs old model's 0.47 on the same sessions; (b) **0.7928** — today's retrain on 66,998 rows; more data shifted which sessions landed in the 20% test bucket, so the sets differ. Both are 80/20 session-level splits with seed=42. | Given NVDA (will win) and AAPL (will lose) both in-flight, model assigns NVDA higher P(win) 70–79% of the time depending on which split. |
 | **Brier Score** | Mean squared error of probability estimates. 0.25=random, 0=perfect. Current: 0.1654. | Model says 70% P(win). Trade wins → Brier contribution = (0.70-1)^2 = 0.09. Averaged across all trades. |
 | **CLOB** | Polymarket's order book. You place limit orders; they fill when a counterparty takes the other side. Thin book, retail-driven. | You submit "BUY 50 YES @ 0.52". Sits in book until someone sells at <=0.52. May not fill for minutes. |
 | **VIX** | The S&P 500 fear index. Rising VIX = fear. Bot tightens entry thresholds on rising-VIX mornings. | VIX jumped +3 overnight. Required edge increases 5% → 8%. NVDA's 6.2% edge now fails the gate. |
 | **tbf_min** | Minutes before 4pm ET close. 390=9:30am open, 120=2pm, 0=close. Feature in settlement model and exit ladder. | Trade entered at 10am: tbf_min=360. By 2pm: tbf_min=120. Model penalises low-tbf — little time to recover. |
 | **live_edge** | Expected profit per dollar risked = `adj_wr × 0.99 - ask_price`. The 0.99 accounts for the 1% Polymarket fee. | adj_wr=0.69, ask=0.52 → live_edge = 0.69×0.99 - 0.52 = +0.163. You expect 16.3c profit per 52c risked. |
-| **3-of-4 conviction** | Entry requires GO signal in >=3 of last 4 two-minute checks. Filters single noisy ticks. | Checks: GO, no-GO, GO, GO → 3/4 = enter. Checks: GO, no-GO, no-GO, GO → 2/4 = wait. |
+| **3-of-4 conviction** | *(Removed in v2 — 2026-05-29)* Entry required GO signal in ≥3 of last 4 two-minute checks. Replaced by single-tick entry when settlement model P(YES) clears 0.55 or P(YES) ≤ 0.45. | |
 | **REVERSAL trade** | BUY NO on a gap-UP day when the stock crosses below yesterday's close (GFR < −1.0). Bypasses signal history — the GFR crossing is the trigger. Calibrated via 338-event backtest. | NVDA gapped up 1.2%, but by 11am is below yesterday's close (GFR = −1.3). Reversal path fires: BUY NO at 51¢, expected +14.8% edge. |
 | **REVERSAL_NO_WR** | Per-ticker NO win rate at the GFR < −1.0 crossing, calibrated from 338 historical events. Used as rev_wr in reversal edge calculation. Replaces adj_wr for this path. | NVDA historical: 84.8% NO win rate when GFR first crosses −1.0 on a gap-UP day. At a 51¢ NO ask: edge = 0.848 × 0.99 − 0.51 = +0.33 = +33%. |
 | **fast-entry (FAST tag)** | Enters after 2 consecutive GO signals if live_edge ≥ 20%, bypassing the normal 3-of-4 wait. Captured in DB as tag="FAST". | Normal 3-of-4 would require 2 more checks (4 min). FAST fires now. Useful when edge is very high and the window is closing. |

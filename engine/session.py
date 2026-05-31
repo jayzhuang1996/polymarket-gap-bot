@@ -13,11 +13,12 @@ from engine.sizer import compute_position_size
 from engine.strategy import (
     _et_now_hm, _in_market_hours, _entry_frozen, _is_late_entry, _is_thursday,
     _entry_edge_min, _fetch_vix_change, _vix_zone, _check_entry, _check_exit,
-    ENTRY_CONFIRMATIONS_NEEDED, FULLY_EXITED_THRESHOLD,
+    FULLY_EXITED_THRESHOLD,
 )
 from engine.data_feed import _token_id
 from engine.order_manager import ORDER_TTL_SEC
 from database.db import get_unresolved_decisions, store_decision, store_outcome, store_scan_log
+from database.wr_store import load_base_wr
 
 
 # ── Startup reconciliation ────────────────────────────────────────────────────
@@ -161,6 +162,14 @@ async def trading_session_loop():
             vix_label = f"{state._vix_change:+.2f}" if state._vix_change is not None else "unavailable"
             print(f"  [session] New trading day — state reset ({today}) | "
                   f"VIX change={vix_label}, high_regime={state._vix_high}")
+            # Reload WR cache from DB so daily EOD updates are picked up.
+            for display, _yahoo in TICKERS:
+                gap_bps = state.current_quotes.get(display, {}).get("gap_bps") or 0
+                gap_up  = gap_bps > 0
+                gap_pct = gap_bps / 10_000.0
+                yes_wr, no_wr, _obs = load_base_wr(display, gap_up, gap_pct=gap_pct)
+                state.wr_cache[display] = (yes_wr, no_wr)
+            print(f"  [session] WR cache reloaded for {len(TICKERS)} tickers")
 
         # VIX refresh every 30 minutes (15 × 2-min ticks)
         last_vix_tick += 1
@@ -223,8 +232,9 @@ async def trading_session_loop():
                         drift         = abs(new_price - pending["price"])
                         drift_label   = (f"{pending['price']:.3f}→{new_price:.3f}"
                                          if drift > REPRICE_DRIFT_THRESHOLD else "stable")
-                        _wr_for_size  = pticker_q.get("settlement_p_win") or pticker_q.get("adj_wr") or 0.60
-                        size_usd      = compute_position_size(_wr_for_size, new_price)
+                        _raw_p_reprice = pticker_q.get("settlement_p_win") or pticker_q.get("adj_wr") or 0.60
+                        _wr_for_size   = (1.0 - _raw_p_reprice) if pending["side"] == "NO" else _raw_p_reprice
+                        size_usd       = compute_position_size(_wr_for_size, new_price)
                         size_contracts = round(size_usd / new_price, 1)
                         new_id = await asyncio.to_thread(
                             state.order_manager.place_buy,
@@ -343,8 +353,9 @@ async def trading_session_loop():
                     if state.order_manager and display not in state._pending_orders:
                         token = _token_id(display, entry["side"])
                         if token:
-                            adj_wr         = entry.get("adj_wr") or 0.60
-                            size_usd       = compute_position_size(adj_wr, entry["entry_price"])
+                            _raw_p_order  = entry.get("settlement_p") or entry.get("adj_wr") or 0.60
+                            _wr_for_order = (1.0 - _raw_p_order) if entry["side"] == "NO" else _raw_p_order
+                            size_usd      = compute_position_size(_wr_for_order, entry["entry_price"])
                             if size_usd > 0:
                                 size_contracts = round(size_usd / entry["entry_price"], 1)
                                 order_id = await asyncio.to_thread(

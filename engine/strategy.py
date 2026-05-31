@@ -14,6 +14,12 @@ Algorithm v2 changes:
 
 import datetime as _dt
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+    _ET_TZ = _ZoneInfo("America/New_York")
+except ImportError:
+    _ET_TZ = None
+
 import yfinance as yf
 
 import engine.state as state
@@ -39,14 +45,17 @@ HARD_EXIT_ET               = (15, 0)
 ET_OFFSET_H                = -4         # EDT (Mar–Nov)
 GFR_COOLDOWN_MINUTES       = 30
 FULLY_EXITED_THRESHOLD     = 0.05
-ENTRY_CONFIRMATIONS_NEEDED = 3          # kept for session.py reprice signal_ok check
+ENTRY_CONFIRMATIONS_NEEDED = 3          # unused since v2 (reprice uses model confidence gate)
 
 
 # ── Time helpers ───────────────────────────────────────────────────────────────
 
 def _et_now_hm() -> tuple[int, int]:
-    utc = _dt.datetime.now(_dt.timezone.utc)
-    et  = utc.replace(tzinfo=None) + _dt.timedelta(hours=ET_OFFSET_H)
+    if _ET_TZ is not None:
+        et = _dt.datetime.now(_ET_TZ)
+    else:
+        utc = _dt.datetime.now(_dt.timezone.utc)
+        et  = utc.replace(tzinfo=None) + _dt.timedelta(hours=ET_OFFSET_H)
     return et.hour, et.minute
 
 
@@ -67,8 +76,12 @@ def _is_thursday() -> bool:
     return _dt.datetime.now().weekday() == 3
 
 
+def _is_thu_fri() -> bool:
+    return _dt.datetime.now().weekday() in (3, 4)
+
+
 def _entry_edge_min(h: int, m: int) -> float:
-    if _is_thursday():
+    if _is_thu_fri():
         return 0.10
     if (h, m) >= TIER2_ENTRY_HOUR_CUTOFF:  # 13:30–14:00
         return 0.20
@@ -296,9 +309,20 @@ def _check_entry(
         if live_edge is None:
             return None
 
-    # NO entry GFR gate: skip NO entry if stock bounced hard above prev_close
-    if side == "NO" and gfr is not None and gfr < GFR_NO_ENTRY_MIN:
+    # NO entry GFR gate: only for gap-DOWN days.
+    # On gap-UP days, the model-driven NO path covers GFR ≥ -0.3, and
+    # _check_reversal_entry covers GFR < -1.0. Blocking in between here
+    # would create a dead zone where neither path fires.
+    if side == "NO" and gap_bps < 0 and gfr is not None and gfr < GFR_NO_ENTRY_MIN:
         return None
+
+    # VIX adjustment (YES trades only) — must come before edge floor check
+    # so the bullish discount can actually save trades that hover near the floor.
+    if side == "YES" and state._vix_change is not None:
+        if VIX_CHANGE_BULLISH_LO <= state._vix_change <= VIX_CHANGE_BULLISH_HI:
+            edge_min = max(0.01, edge_min - VIX_BULLISH_EDGE_DISCOUNT)
+        elif state._vix_change > VIX_CHANGE_BEARISH_MIN:
+            edge_min += VIX_BEARISH_EDGE_PENALTY
 
     if live_edge < edge_min:
         return None
@@ -311,15 +335,6 @@ def _check_entry(
     spread_max = min(_entry_spread_max(h, m), 10.0 if reentry else 999.0)
     if spread is None or spread > spread_max:
         return None
-
-    # VIX adjustment (YES trades only)
-    if side == "YES" and state._vix_change is not None:
-        if VIX_CHANGE_BULLISH_LO <= state._vix_change <= VIX_CHANGE_BULLISH_HI:
-            edge_min = max(0.01, edge_min - VIX_BULLISH_EDGE_DISCOUNT)
-        elif state._vix_change > VIX_CHANGE_BEARISH_MIN:
-            edge_min += VIX_BEARISH_EDGE_PENALTY
-        if live_edge < edge_min:
-            return None
 
     adj_wr_for_db = (
         round(settlement_p, 4) if settlement_p is not None
@@ -355,6 +370,16 @@ def _check_exit(
 
     side        = position.get("entry_side", "YES")
     current_bid = q.get("yes_bid") if side == "YES" else q.get("no_bid")
+
+    # 1. Hard 3pm exit — must fire even when bid is stale or missing.
+    # Fall back to entry_price so the position records at breakeven rather than
+    # staying open indefinitely (the AMZN-style silent failure).
+    if (h, m) >= HARD_EXIT_ET and "hard_3pm" not in fired:
+        price      = current_bid if current_bid else entry_price
+        profit_pct = (price - entry_price) / entry_price
+        return {"reason": "hard_3pm", "fraction": 1.0,
+                "price": price, "profit_pct": profit_pct}
+
     if not current_bid:
         return None
 
@@ -362,11 +387,6 @@ def _check_exit(
     adj_wr     = q.get("adj_wr")
     payout     = 1.0 - TRADING_FEE_PCT
     profit_pct = (current_bid - entry_price) / entry_price
-
-    # 1. Hard 3pm exit
-    if (h, m) >= HARD_EXIT_ET and "hard_3pm" not in fired:
-        return {"reason": "hard_3pm", "fraction": 1.0,
-                "price": current_bid, "profit_pct": profit_pct}
 
     # 2. NO trade intraday protection
     if side == "NO":
