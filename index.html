@@ -106,7 +106,7 @@ header{display:flex;align-items:flex-end;justify-content:space-between;flex-wrap
 
 /* clob section */
 .z-clob{padding:8px 13px 9px;}
-.ptable{display:grid;grid-template-columns:26px 1fr 1fr 42px;font-family:var(--f-mono);font-size:0.62rem;}
+.ptable{display:grid;grid-template-columns:26px 1fr 1fr 72px;font-family:var(--f-mono);font-size:0.62rem;}
 .ph{color:var(--ink2);font-size:0.6rem;text-transform:uppercase;letter-spacing:0.1em;padding:3px 0 4px;border-bottom:1px solid var(--cobalt);}
 .ph:first-child{border-bottom:none;}
 .pc{padding:3px 0;border-bottom:1px solid var(--paper2);color:var(--ink);font-variant-numeric:tabular-nums;font-size:0.72rem;}
@@ -353,7 +353,7 @@ function buildCard(t) {
   const pYesStr = pYes != null ? (pYes*100).toFixed(0)+'%' : '—';
 
   // Model direction: ≥0.55 → YES, ≤0.45 → NO, middle → SKIP
-  let modelDir = pYes == null ? null : pYes >= SETTLEMENT_YES_THRESHOLD ? 'YES' : pYes <= (1 - SETTLEMENT_YES_THRESHOLD) ? 'NO' : 'SKIP';
+  let modelDir = pYes == null ? null : pYes >= SETTLEMENT_YES_THRESHOLD ? 'UP' : pYes <= (1 - SETTLEMENT_YES_THRESHOLD) ? 'DOWN' : 'SKIP';
 
   // Per-side live edges: settlement_p × payout(0.99) − ask
   const yesEdge = (pYes != null && q.yes_ask != null) ? pYes * 0.99 - q.yes_ask : null;
@@ -366,7 +366,7 @@ function buildCard(t) {
   const noEdgeCls  = eCls(noEdge);
 
   // Primary edge for signal strip header
-  const primaryEdge = modelDir==='YES' ? yesEdge : modelDir==='NO' ? noEdge : null;
+  const primaryEdge = modelDir==='UP' ? yesEdge : modelDir==='DOWN' ? noEdge : null;
   const primaryEdgeStr = fEdge(primaryEdge);
 
   // ── Entry gate ───────────────────────────────────────────────────────────
@@ -398,7 +398,7 @@ function buildCard(t) {
   } else {
     sigLabel = `MODEL → ${modelDir}`;
     sigNote  = '';
-    sigStrip = modelDir==='YES'?'go':modelDir==='NO'?'fade':'skip';
+    sigStrip = modelDir==='UP'?'go':modelDir==='DOWN'?'fade':'skip';
   }
 
   // ── P(YES) color: ≥0.55 green, ≤0.45 orange, middle gray ────────────────
@@ -442,8 +442,10 @@ function buildCard(t) {
 
   const cardCls = `card ${has?'':'nodata'}${isAborted?' aborted-card':''}`;
   const ysc = sc(q.yes_spread), nsc = sc(q.no_spread);
-  const ysv = q.yes_spread!=null?q.yes_spread.toFixed(1)+'%':'—';
-  const nsv = q.no_spread!=null? q.no_spread.toFixed(1)+'%':'—';
+  const yesSpreadCents = q.yes_ask!=null && q.yes_bid!=null ? ((q.yes_ask-q.yes_bid)*100).toFixed(0) : null;
+  const noSpreadCents  = q.no_ask!=null && q.no_bid!=null ? ((q.no_ask-q.no_bid)*100).toFixed(0) : null;
+  const ysv = q.yes_spread!=null? q.yes_spread.toFixed(1)+'%'+(yesSpreadCents!=null?` · ${yesSpreadCents}¢`:'') : '—';
+  const nsv = q.no_spread!=null? q.no_spread.toFixed(1)+'%'+(noSpreadCents!=null?` · ${noSpreadCents}¢`:'') : '—';
   const warn = (q.no_spread>15||q.yes_spread>15)?'Wide spread':'';
 
   return `<div class="${cardCls}" id="card-${t}">
@@ -465,8 +467,8 @@ function buildCard(t) {
   </div>
   <div class="z-algo">
     <div class="algo-row"><span class="algo-lbl">Settlement P(YES)</span><span class="algo-val ${pYesCls}">${pYesStr}</span></div>
-    <div class="algo-row"><span class="algo-lbl">YES edge</span><span class="algo-val ${yesEdgeCls}">${yesEdgeStr}</span></div>
-    <div class="algo-row"><span class="algo-lbl">NO edge</span><span class="algo-val ${noEdgeCls}">${noEdgeStr}</span></div>
+    <div class="algo-row"><span class="algo-lbl">UP edge</span><span class="algo-val ${yesEdgeCls}">${yesEdgeStr}</span></div>
+    <div class="algo-row"><span class="algo-lbl">DOWN edge</span><span class="algo-val ${noEdgeCls}">${noEdgeStr}</span></div>
     ${noStopHtml}
     <div class="algo-row"><span class="algo-lbl">Entry floor${edgeNote}</span><span class="algo-val ${edgeCls}">${edgeFloor}</span></div>
   </div>
@@ -478,8 +480,8 @@ function buildCard(t) {
   <div class="z-clob">
     <div class="ptable">
       <span class="ph"></span><span class="ph">Ask</span><span class="ph">Bid</span><span class="ph">Sprd</span>
-      <span class="pc lbl">YES</span><span class="pc">${f3(q.yes_ask)}</span><span class="pc">${f3(q.yes_bid)}</span><span class="pc ${ysc}">${ysv}</span>
-      <span class="pc lbl">NO</span><span class="pc">${f3(q.no_ask)}</span><span class="pc">${f3(q.no_bid)}</span><span class="pc ${nsc}">${nsv}</span>
+      <span class="pc lbl">UP</span><span class="pc">${f3(q.yes_ask)}</span><span class="pc">${f3(q.yes_bid)}</span><span class="pc ${ysc}">${ysv}</span>
+      <span class="pc lbl">DOWN</span><span class="pc">${f3(q.no_ask)}</span><span class="pc">${f3(q.no_bid)}</span><span class="pc ${nsc}">${nsv}</span>
     </div>
   </div>
   <div class="card-foot"><span>Updated ${etFmt(q.updated_at)} ET</span><span>${warn}</span></div>
@@ -577,6 +579,7 @@ async function loadPositions() {
     const trs = rows.map(r => {
       const q      = quotes[r.ticker] || {};
       const side   = r.entry_side || '—';
+      const sideDisplay = side==='YES'?'UP':side==='NO'?'DOWN':side;
       const ep     = r.entry_price;
       const sz     = r.position_size;
       const contracts = ep&&ep>0 ? sz/ep : 0;
@@ -609,7 +612,7 @@ async function loadPositions() {
 
       return `<tr>
         <td><strong>${r.ticker}</strong></td>
-        <td class="${sideCls}">${side}</td>
+        <td class="${sideCls}">${sideDisplay}</td>
         <td>$${ep?ep.toFixed(3):'—'}</td>
         <td>${contracts>0?contracts.toFixed(0):'—'} ctrs</td>
         <td>${exitBid?'$'+exitBid.toFixed(3):'—'}</td>
@@ -700,6 +703,7 @@ async function openTradeLog() {
       const pnlCls  = pnl==null?'':pnl>=0?'pnl-pos':'pnl-neg';
       const pnlStr  = pnl!=null?(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2):'—';
       const side    = t.entry_side||'—';
+      const sideDisplay2 = side==='YES'?'UP':side==='NO'?'DOWN':side;
       const sideCls = side==='YES'?'side-yes':side==='NO'?'side-no':'';
       const ep      = t.entry_price ? '$'+Number(t.entry_price).toFixed(3) : '—';
       const sz      = t.position_size ? '$'+Number(t.position_size).toFixed(0) : '—';
@@ -712,7 +716,7 @@ async function openTradeLog() {
         <td class="${statusCls}">${isOpen?'OPEN':'CLOSED'}</td>
         <td>${t.date||'—'}</td>
         <td><strong>${t.ticker}</strong></td>
-        <td class="${sideCls}">${side}</td>
+        <td class="${sideCls}">${sideDisplay2}</td>
         <td>${ep}</td><td>${sz}</td><td>${gap}</td>
         <td>${exitInfo}</td>
         <td class="${pnlCls}">${pnlStr}</td>
