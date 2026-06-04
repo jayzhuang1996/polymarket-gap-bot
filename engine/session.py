@@ -15,7 +15,7 @@ from engine.strategy import (
     _entry_edge_min, _fetch_vix_change, _vix_zone, _check_entry, _check_exit,
     FULLY_EXITED_THRESHOLD,
 )
-from engine.data_feed import _token_id
+from engine.data_feed import _token_id, discover_markets, calc_gaps
 from engine.order_manager import ORDER_TTL_SEC
 from database.db import get_unresolved_decisions, store_decision, store_outcome, store_scan_log
 from database.wr_store import load_base_wr
@@ -162,6 +162,22 @@ async def trading_session_loop():
             vix_label = f"{state._vix_change:+.2f}" if state._vix_change is not None else "unavailable"
             print(f"  [session] New trading day — state reset ({today}) | "
                   f"VIX change={vix_label}, high_regime={state._vix_high}")
+            # Re-discover today's markets — token IDs change every day.
+            new_markets = await discover_markets()
+            if new_markets:
+                state.market_list = new_markets
+                state.token_map.clear()
+                for m in new_markets:
+                    state.token_map[m["yes_token"]] = {"ticker": m["ticker"], "side": "YES"}
+                    state.token_map[m["no_token"]]  = {"ticker": m["ticker"], "side": "NO"}
+                gap_data = calc_gaps()
+                for ticker, (bps, open_p, prev_p) in gap_data.items():
+                    q = state.current_quotes.setdefault(ticker, {"ticker": ticker})
+                    q.update({"gap_bps": bps, "open_price": open_p, "prev_close": prev_p})
+                print(f"  [session] Markets re-discovered: {len(new_markets)} tokens refreshed")
+            else:
+                print("  [session] WARNING: market re-discovery returned 0 markets")
+
             # Reload WR cache from DB so daily EOD updates are picked up.
             for display, _yahoo in TICKERS:
                 gap_bps = state.current_quotes.get(display, {}).get("gap_bps") or 0

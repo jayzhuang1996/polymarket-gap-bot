@@ -19,10 +19,11 @@ WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 async def polymarket_loop():
     """Connect to Polymarket CLOB WS; update in-memory state and enqueue broadcasts."""
-    asset_ids = list(state.token_map.keys())
-    if not asset_ids:
-        return
     while True:
+        asset_ids = list(state.token_map.keys())
+        if not asset_ids:
+            await asyncio.sleep(5)
+            continue
         try:
             async with websockets.connect(WS_URL, ping_interval=30, ping_timeout=10) as ws:
                 await ws.send(json.dumps({
@@ -36,6 +37,9 @@ async def polymarket_loop():
                         continue
                     for ev in data if isinstance(data, list) else [data]:
                         _process_event(ev)
+                    # Token IDs changed (daily reset) — reconnect to new markets.
+                    if set(state.token_map.keys()) != set(asset_ids):
+                        break
         except Exception:
             await asyncio.sleep(5)
 
